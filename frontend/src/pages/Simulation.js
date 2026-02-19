@@ -37,7 +37,7 @@ export default function Simulation() {
   return () => clearInterval(timer);
 }, [timeLeft]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [attemptRes, questionsRes] = await Promise.all([
         getAttempt(attemptId),
