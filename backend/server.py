@@ -28,6 +28,9 @@ JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
 # Create the main app
 app = FastAPI()
+@app.get("/")
+def root():
+    return {"message": "API ProvaNota funcionando 🚀"}
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
