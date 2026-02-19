@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getAttempt, getExamQuestions, saveAnswer, submitAttempt } from '../api';
 import { Clock, ChevronLeft, ChevronRight, Flag, CheckCircle, Send } from 'lucide-react';
@@ -22,20 +22,20 @@ export default function Simulation() {
   }, [attemptId]);
 
   useEffect(() => {
-    if (timeLeft <= 0) return;
+  if (timeLeft <= 0) return;
 
-    const timer = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          handleAutoSubmit();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+  const timer = setInterval(() => {
+    setTimeLeft(prev => {
+      if (prev <= 1) {
+        SubmitAttempt();
+        return 0;
+      }
+      return prev - 1;
+    });
+  }, 1000);
 
-    return () => clearInterval(timer);
-  }, [timeLeft]);
+  return () => clearInterval(timer);
+}, [timeLeft]);
 
   const loadData = async () => {
     try {
