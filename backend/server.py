@@ -40,8 +40,7 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     name: str
-    role: str = 'student'  # 'student' or 'admin'
-
+    
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
