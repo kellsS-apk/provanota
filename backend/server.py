@@ -1,46 +1,113 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from __future__ import annotations
+
 import os
+import uuid
 import logging
 from pathlib import Path
+from typing import List, Optional, Dict, Any, Literal, Set
+
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
-from typing import List, Optional, Dict, Any
-import uuid
 from datetime import datetime, timezone, timedelta
+
 import bcrypt
 import jwt
 
+
+# =========================
+# Config / Env
+# =========================
+
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+MONGO_URL = os.environ.get("MONGO_URL")
+DB_NAME = os.environ.get("DB_NAME")
+JWT_SECRET = os.environ.get("JWT_SECRET")  # obrigatório em produção
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "")
+ADMIN_EMAILS_RAW = os.environ.get("ADMIN_EMAILS", "")
+ADMIN_PROMOTION_SECRET = os.environ.get("ADMIN_PROMOTION_SECRET", "")
 
-# JWT settings
-JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
-JWT_ALGORITHM = 'HS256'
-JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.environ.get("JWT_EXPIRATION_HOURS", str(24 * 7)))  # 7 dias
 
-# Create the main app
-app = FastAPI()
+if not MONGO_URL or not DB_NAME:
+    raise RuntimeError("MONGO_URL e DB_NAME são obrigatórios no .env / Render")
+
+if not JWT_SECRET:
+    # Para dev local você até pode gerar um fallback, mas em produção é perigoso.
+    raise RuntimeError("JWT_SECRET é obrigatório (não use default em produção)")
+
+def parse_origins(value: str) -> List[str]:
+    # Espera: "https://site1.com,https://site2.com"
+    origins = [o.strip() for o in (value or "").split(",") if o.strip()]
+    return origins
+
+def parse_admin_emails(value: str) -> Set[str]:
+    return {e.strip().lower() for e in (value or "").split(",") if e.strip()}
+
+ALLOWED_ORIGINS = parse_origins(CORS_ORIGINS)
+ADMIN_EMAILS = parse_admin_emails(ADMIN_EMAILS_RAW)
+
+
+# =========================
+# Logging
+# =========================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("provanota-api")
+
+
+# =========================
+# App + DB (lifespan)
+# =========================
+
+security = HTTPBearer()
+api_router = APIRouter(prefix="/api")
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+app = FastAPI(title="ProvaNota API", version="1.0.0")
+
+
 @app.get("/")
 def root():
     return {"message": "API ProvaNota funcionando 🚀"}
-api_router = APIRouter(prefix="/api")
-security = HTTPBearer()
 
-# ===== MODELS =====
+
+@app.get("/health")
+async def health():
+    # ping simples no mongo
+    try:
+        await db.command("ping")
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("Healthcheck falhou")
+        raise HTTPException(status_code=503, detail="Database unavailable") from e
+
+
+# =========================
+# Models
+# =========================
+
+Role = Literal["student", "admin"]
+Difficulty = Literal["easy", "medium", "hard"]
+AltLetter = Literal["A", "B", "C", "D", "E"]
 
 class UserRegister(BaseModel):
     email: EmailStr
-    password: str
-    name: str
-    
+    password: str = Field(min_length=8, max_length=72)  # bcrypt trabalha bem até 72 bytes
+    name: str = Field(min_length=2, max_length=80)
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
@@ -50,17 +117,17 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: str
-    role: str
-    subscription_status: str
+    role: Role
+    subscription_status: Literal["free", "premium"]
     preferred_exam: Optional[str] = None
 
 class ExamCreate(BaseModel):
-    title: str
-    year: int
-    banca: str
-    duration_minutes: int
-    instructions: str
-    areas: List[str]  # ['Linguagens', 'Humanas', 'Natureza', 'Matemática']
+    title: str = Field(min_length=3, max_length=120)
+    year: int = Field(ge=1900, le=2100)
+    banca: str = Field(min_length=2, max_length=80)
+    duration_minutes: int = Field(ge=1, le=600)
+    instructions: str = Field(min_length=0, max_length=5000)
+    areas: List[str]  # ex: ['Linguagens','Humanas','Natureza','Matemática']
 
 class ExamResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -77,18 +144,18 @@ class ExamResponse(BaseModel):
     question_count: int = 0
 
 class Alternative(BaseModel):
-    letter: str  # A, B, C, D, E
-    text: str
+    letter: AltLetter
+    text: str = Field(min_length=1, max_length=2000)
 
 class QuestionCreate(BaseModel):
     exam_id: str
-    statement: str
+    statement: str = Field(min_length=5, max_length=20000)
     image_url: Optional[str] = None
-    alternatives: List[Alternative]
-    correct_answer: str  # A, B, C, D, or E
-    tags: List[str]
-    difficulty: str  # 'easy', 'medium', 'hard'
-    area: str  # Linguagens, Humanas, Natureza, Matemática
+    alternatives: List[Alternative] = Field(min_length=2, max_length=6)
+    correct_answer: AltLetter
+    tags: List[str] = Field(default_factory=list, max_length=30)
+    difficulty: Difficulty
+    area: str
 
 class QuestionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -97,9 +164,9 @@ class QuestionResponse(BaseModel):
     statement: str
     image_url: Optional[str] = None
     alternatives: List[Alternative]
-    correct_answer: str
+    correct_answer: AltLetter
     tags: List[str]
-    difficulty: str
+    difficulty: Difficulty
     area: str
     order: int
 
@@ -111,7 +178,7 @@ class QuestionResponseStudent(BaseModel):
     image_url: Optional[str] = None
     alternatives: List[Alternative]
     tags: List[str]
-    difficulty: str
+    difficulty: Difficulty
     area: str
     order: int
 
@@ -120,7 +187,7 @@ class AttemptCreate(BaseModel):
 
 class AnswerSubmit(BaseModel):
     question_id: str
-    selected_answer: str  # A, B, C, D, E
+    selected_answer: AltLetter
 
 class AttemptResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -130,445 +197,402 @@ class AttemptResponse(BaseModel):
     exam_title: str
     start_time: str
     end_time: Optional[str] = None
-    status: str  # 'in_progress' or 'completed'
-    answers: Dict[str, str] = {}  # question_id -> selected_answer
+    status: Literal["in_progress", "completed"]
+    answers: Dict[str, AltLetter] = Field(default_factory=dict)
     score: Optional[Dict[str, Any]] = None
 
-class AttemptSubmit(BaseModel):
-    pass  # No body needed, just trigger submission
+class PromoteAdminRequest(BaseModel):
+    email: EmailStr
+    secret: str
 
-# ===== AUTH HELPERS =====
+
+# =========================
+# Auth helpers
+# =========================
 
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    # bcrypt recebe bytes
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 def create_jwt_token(user_id: str) -> str:
     expiration = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
-    payload = {
-        'user_id': user_id,
-        'exp': expiration
-    }
+    payload = {"user_id": user_id, "exp": expiration}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     try:
         token = credentials.credentials
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get('user_id')
+        user_id = payload.get("user_id")
         if not user_id:
-            raise HTTPException(status_code=401, detail='Invalid token')
-        
-        user = await db.users.find_one({'id': user_id}, {'_id': 0})
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        user = await db.users.find_one({"id": user_id}, {"_id": 0})
         if not user:
-            raise HTTPException(status_code=401, detail='User not found')
-        
+            raise HTTPException(status_code=401, detail="User not found")
+
         return user
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail='Token expired')
+        raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail='Invalid token')
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-# ===== AUTH ROUTES =====
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+# =========================
+# AUTH ROUTES
+# =========================
 
 @api_router.post("/auth/register", response_model=dict)
 async def register(user_data: UserRegister):
-    # Check if user exists
-    existing = await db.users.find_one({'email': user_data.email}, {'_id': 0})
+    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
     if existing:
-        raise HTTPException(status_code=400, detail='Email already registered')
-    
-    # Create user
+        raise HTTPException(status_code=400, detail="Email already registered")
+
     user_id = str(uuid.uuid4())
+
+    # Segurança: role NÃO vem do cliente.
+    # Whitelist opcional por e-mail (ADMIN_EMAILS).
+    role: Role = "admin" if user_data.email.lower() in ADMIN_EMAILS else "student"
+
     user_doc = {
-        'id': user_id,
-        'email': user_data.email,
-        'password_hash': hash_password(user_data.password),
-        'name': user_data.name,
-        'role': user_data.role,
-        'subscription_status': 'free',
-        'preferred_exam': None,
-        'created_at': datetime.now(timezone.utc).isoformat()
+        "id": user_id,
+        "email": user_data.email,
+        "password_hash": hash_password(user_data.password),
+        "name": user_data.name,
+        "role": role,
+        "subscription_status": "free",
+        "preferred_exam": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    
+
     await db.users.insert_one(user_doc)
-    
     token = create_jwt_token(user_id)
-    return {'token': token, 'user': UserResponse(**user_doc)}
+
+    return {"token": token, "user": UserResponse(**user_doc)}
 
 @api_router.post("/auth/login", response_model=dict)
 async def login(credentials: UserLogin):
-    user = await db.users.find_one({'email': credentials.email}, {'_id': 0})
+    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
     if not user:
-        raise HTTPException(status_code=401, detail='Invalid credentials')
-    
-    if not verify_password(credentials.password, user['password_hash']):
-        raise HTTPException(status_code=401, detail='Invalid credentials')
-    
-    token = create_jwt_token(user['id'])
-    return {'token': token, 'user': UserResponse(**user)}
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(credentials.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_jwt_token(user["id"])
+    return {"token": token, "user": UserResponse(**user)}
 
 @api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
     return UserResponse(**current_user)
 
-# ===== ADMIN EXAM ROUTES =====
+@api_router.post("/admin/promote", response_model=dict)
+async def promote_admin(payload: PromoteAdminRequest):
+    """
+    Endpoint opcional para promover admin com um segredo.
+    Use só se você quiser “promover” depois do cadastro.
+
+    Configure ADMIN_PROMOTION_SECRET no Render.
+    """
+    if not ADMIN_PROMOTION_SECRET:
+        raise HTTPException(status_code=404, detail="Promotion disabled")
+
+    if payload.secret != ADMIN_PROMOTION_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+
+    email = payload.email.lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.users.update_one({"email": email}, {"$set": {"role": "admin"}})
+    return {"message": "User promoted to admin"}
+
+
+# =========================
+# ADMIN EXAM ROUTES
+# =========================
 
 @api_router.post("/admin/exams", response_model=ExamResponse)
-async def create_exam(exam_data: ExamCreate, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
+async def create_exam(exam_data: ExamCreate, current_user: dict = Depends(require_admin)):
     exam_id = str(uuid.uuid4())
     exam_doc = {
-        'id': exam_id,
-        'title': exam_data.title,
-        'year': exam_data.year,
-        'banca': exam_data.banca,
-        'duration_minutes': exam_data.duration_minutes,
-        'instructions': exam_data.instructions,
-        'areas': exam_data.areas,
-        'published': False,
-        'created_by': current_user['id'],
-        'created_at': datetime.now(timezone.utc).isoformat()
+        "id": exam_id,
+        "title": exam_data.title,
+        "year": exam_data.year,
+        "banca": exam_data.banca,
+        "duration_minutes": exam_data.duration_minutes,
+        "instructions": exam_data.instructions,
+        "areas": exam_data.areas,
+        "published": False,
+        "created_by": current_user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    
+
     await db.exams.insert_one(exam_doc)
     return ExamResponse(**exam_doc, question_count=0)
 
 @api_router.get("/admin/exams", response_model=List[ExamResponse])
-async def get_admin_exams(current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    exams = await db.exams.find({}, {'_id': 0}).to_list(1000)
-    
-    # Get question counts
+async def get_admin_exams(current_user: dict = Depends(require_admin)):
+    exams = await db.exams.find({}, {"_id": 0}).to_list(1000)
     for exam in exams:
-        count = await db.questions.count_documents({'exam_id': exam['id']})
-        exam['question_count'] = count
-    
+        exam["question_count"] = await db.questions.count_documents({"exam_id": exam["id"]})
     return [ExamResponse(**exam) for exam in exams]
 
 @api_router.get("/admin/exams/{exam_id}", response_model=ExamResponse)
-async def get_admin_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    exam = await db.exams.find_one({'id': exam_id}, {'_id': 0})
+async def get_admin_exam(exam_id: str, current_user: dict = Depends(require_admin)):
+    exam = await db.exams.find_one({"id": exam_id}, {"_id": 0})
     if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    count = await db.questions.count_documents({'exam_id': exam_id})
-    exam['question_count'] = count
-    
+        raise HTTPException(status_code=404, detail="Exam not found")
+    exam["question_count"] = await db.questions.count_documents({"exam_id": exam_id})
     return ExamResponse(**exam)
 
 @api_router.put("/admin/exams/{exam_id}", response_model=ExamResponse)
-async def update_exam(exam_id: str, exam_data: ExamCreate, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    result = await db.exams.update_one(
-        {'id': exam_id},
-        {'$set': exam_data.model_dump()}
-    )
-    
+async def update_exam(exam_id: str, exam_data: ExamCreate, current_user: dict = Depends(require_admin)):
+    result = await db.exams.update_one({"id": exam_id}, {"$set": exam_data.model_dump()})
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    exam = await db.exams.find_one({'id': exam_id}, {'_id': 0})
-    count = await db.questions.count_documents({'exam_id': exam_id})
-    exam['question_count'] = count
-    
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    exam = await db.exams.find_one({"id": exam_id}, {"_id": 0})
+    exam["question_count"] = await db.questions.count_documents({"exam_id": exam_id})
     return ExamResponse(**exam)
 
 @api_router.delete("/admin/exams/{exam_id}")
-async def delete_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    # Delete all questions first
-    await db.questions.delete_many({'exam_id': exam_id})
-    
-    result = await db.exams.delete_one({'id': exam_id})
+async def delete_exam(exam_id: str, current_user: dict = Depends(require_admin)):
+    await db.questions.delete_many({"exam_id": exam_id})
+    result = await db.exams.delete_one({"id": exam_id})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    return {'message': 'Exam deleted successfully'}
+        raise HTTPException(status_code=404, detail="Exam not found")
+    return {"message": "Exam deleted successfully"}
 
 @api_router.post("/admin/exams/{exam_id}/publish")
-async def publish_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    result = await db.exams.update_one(
-        {'id': exam_id},
-        {'$set': {'published': True}}
-    )
-    
+async def publish_exam(exam_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.exams.update_one({"id": exam_id}, {"$set": {"published": True}})
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    return {'message': 'Exam published successfully'}
+        raise HTTPException(status_code=404, detail="Exam not found")
+    return {"message": "Exam published successfully"}
 
 @api_router.post("/admin/exams/{exam_id}/unpublish")
-async def unpublish_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    result = await db.exams.update_one(
-        {'id': exam_id},
-        {'$set': {'published': False}}
-    )
-    
+async def unpublish_exam(exam_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.exams.update_one({"id": exam_id}, {"$set": {"published": False}})
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    return {'message': 'Exam unpublished successfully'}
+        raise HTTPException(status_code=404, detail="Exam not found")
+    return {"message": "Exam unpublished successfully"}
 
-# ===== ADMIN QUESTION ROUTES =====
+
+# =========================
+# ADMIN QUESTION ROUTES
+# =========================
 
 @api_router.post("/admin/questions", response_model=QuestionResponse)
-async def create_question(question_data: QuestionCreate, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    # Get current question count for ordering
-    count = await db.questions.count_documents({'exam_id': question_data.exam_id})
-    
+async def create_question(question_data: QuestionCreate, current_user: dict = Depends(require_admin)):
+    count = await db.questions.count_documents({"exam_id": question_data.exam_id})
     question_id = str(uuid.uuid4())
+
     question_doc = {
-        'id': question_id,
-        'exam_id': question_data.exam_id,
-        'statement': question_data.statement,
-        'image_url': question_data.image_url,
-        'alternatives': [alt.model_dump() for alt in question_data.alternatives],
-        'correct_answer': question_data.correct_answer,
-        'tags': question_data.tags,
-        'difficulty': question_data.difficulty,
-        'area': question_data.area,
-        'order': count + 1
+        "id": question_id,
+        "exam_id": question_data.exam_id,
+        "statement": question_data.statement,
+        "image_url": question_data.image_url,
+        "alternatives": [alt.model_dump() for alt in question_data.alternatives],
+        "correct_answer": question_data.correct_answer,
+        "tags": question_data.tags,
+        "difficulty": question_data.difficulty,
+        "area": question_data.area,
+        "order": count + 1,
     }
-    
+
     await db.questions.insert_one(question_doc)
     return QuestionResponse(**question_doc)
 
 @api_router.get("/admin/exams/{exam_id}/questions", response_model=List[QuestionResponse])
-async def get_admin_questions(exam_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    questions = await db.questions.find({'exam_id': exam_id}, {'_id': 0}).sort('order', 1).to_list(1000)
+async def get_admin_questions(exam_id: str, current_user: dict = Depends(require_admin)):
+    questions = await db.questions.find({"exam_id": exam_id}, {"_id": 0}).sort("order", 1).to_list(1000)
     return [QuestionResponse(**q) for q in questions]
 
 @api_router.put("/admin/questions/{question_id}", response_model=QuestionResponse)
-async def update_question(question_id: str, question_data: QuestionCreate, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    # Get existing order
-    existing = await db.questions.find_one({'id': question_id}, {'_id': 0})
+async def update_question(question_id: str, question_data: QuestionCreate, current_user: dict = Depends(require_admin)):
+    existing = await db.questions.find_one({"id": question_id}, {"_id": 0})
     if not existing:
-        raise HTTPException(status_code=404, detail='Question not found')
-    
+        raise HTTPException(status_code=404, detail="Question not found")
+
     update_data = question_data.model_dump()
-    update_data['alternatives'] = [alt.model_dump() for alt in question_data.alternatives]
-    update_data['order'] = existing['order']
-    
-    result = await db.questions.update_one(
-        {'id': question_id},
-        {'$set': update_data}
-    )
-    
-    question = await db.questions.find_one({'id': question_id}, {'_id': 0})
+    update_data["alternatives"] = [alt.model_dump() for alt in question_data.alternatives]
+    update_data["order"] = existing["order"]
+
+    await db.questions.update_one({"id": question_id}, {"$set": update_data})
+    question = await db.questions.find_one({"id": question_id}, {"_id": 0})
     return QuestionResponse(**question)
 
 @api_router.delete("/admin/questions/{question_id}")
-async def delete_question(question_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
-    result = await db.questions.delete_one({'id': question_id})
+async def delete_question(question_id: str, current_user: dict = Depends(require_admin)):
+    result = await db.questions.delete_one({"id": question_id})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail='Question not found')
-    
-    return {'message': 'Question deleted successfully'}
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"message": "Question deleted successfully"}
 
-# ===== STUDENT EXAM ROUTES =====
+
+# =========================
+# STUDENT EXAM ROUTES
+# =========================
 
 @api_router.get("/exams", response_model=List[ExamResponse])
 async def get_exams(current_user: dict = Depends(get_current_user)):
-    exams = await db.exams.find({'published': True}, {'_id': 0}).to_list(1000)
-    
-    # Get question counts
+    exams = await db.exams.find({"published": True}, {"_id": 0}).to_list(1000)
     for exam in exams:
-        count = await db.questions.count_documents({'exam_id': exam['id']})
-        exam['question_count'] = count
-    
+        exam["question_count"] = await db.questions.count_documents({"exam_id": exam["id"]})
     return [ExamResponse(**exam) for exam in exams]
 
 @api_router.get("/exams/{exam_id}", response_model=ExamResponse)
 async def get_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    exam = await db.exams.find_one({'id': exam_id, 'published': True}, {'_id': 0})
+    exam = await db.exams.find_one({"id": exam_id, "published": True}, {"_id": 0})
     if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    count = await db.questions.count_documents({'exam_id': exam_id})
-    exam['question_count'] = count
-    
+        raise HTTPException(status_code=404, detail="Exam not found")
+    exam["question_count"] = await db.questions.count_documents({"exam_id": exam_id})
     return ExamResponse(**exam)
 
 @api_router.get("/exams/{exam_id}/questions", response_model=List[QuestionResponseStudent])
 async def get_exam_questions(exam_id: str, current_user: dict = Depends(get_current_user)):
-    # Check if exam is published
-    exam = await db.exams.find_one({'id': exam_id, 'published': True}, {'_id': 0})
+    exam = await db.exams.find_one({"id": exam_id, "published": True}, {"_id": 0})
     if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
-    questions = await db.questions.find({'exam_id': exam_id}, {'_id': 0, 'correct_answer': 0}).sort('order', 1).to_list(1000)
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    questions = await db.questions.find(
+        {"exam_id": exam_id},
+        {"_id": 0, "correct_answer": 0},
+    ).sort("order", 1).to_list(1000)
+
     return [QuestionResponseStudent(**q) for q in questions]
 
-# ===== ATTEMPT ROUTES =====
+
+# =========================
+# ATTEMPT ROUTES
+# =========================
 
 @api_router.post("/attempts", response_model=AttemptResponse)
 async def create_attempt(attempt_data: AttemptCreate, current_user: dict = Depends(get_current_user)):
-    # Check if exam exists and is published
-    exam = await db.exams.find_one({'id': attempt_data.exam_id, 'published': True}, {'_id': 0})
+    exam = await db.exams.find_one({"id": attempt_data.exam_id, "published": True}, {"_id": 0})
     if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-    
+        raise HTTPException(status_code=404, detail="Exam not found")
+
     attempt_id = str(uuid.uuid4())
     attempt_doc = {
-        'id': attempt_id,
-        'user_id': current_user['id'],
-        'exam_id': attempt_data.exam_id,
-        'exam_title': exam['title'],
-        'start_time': datetime.now(timezone.utc).isoformat(),
-        'end_time': None,
-        'status': 'in_progress',
-        'answers': {},
-        'score': None
+        "id": attempt_id,
+        "user_id": current_user["id"],
+        "exam_id": attempt_data.exam_id,
+        "exam_title": exam["title"],
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "end_time": None,
+        "status": "in_progress",
+        "answers": {},
+        "score": None,
     }
-    
+
     await db.attempts.insert_one(attempt_doc)
     return AttemptResponse(**attempt_doc)
 
 @api_router.get("/attempts/{attempt_id}", response_model=AttemptResponse)
 async def get_attempt(attempt_id: str, current_user: dict = Depends(get_current_user)):
-    attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
+    attempt = await db.attempts.find_one({"id": attempt_id, "user_id": current_user["id"]}, {"_id": 0})
     if not attempt:
-        raise HTTPException(status_code=404, detail='Attempt not found')
-    
+        raise HTTPException(status_code=404, detail="Attempt not found")
     return AttemptResponse(**attempt)
 
 @api_router.post("/attempts/{attempt_id}/answer")
 async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: dict = Depends(get_current_user)):
-    attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
+    attempt = await db.attempts.find_one({"id": attempt_id, "user_id": current_user["id"]}, {"_id": 0})
     if not attempt:
-        raise HTTPException(status_code=404, detail='Attempt not found')
-    
-    if attempt['status'] != 'in_progress':
-        raise HTTPException(status_code=400, detail='Attempt already completed')
-    
-    # Update answer
-    result = await db.attempts.update_one(
-        {'id': attempt_id},
-        {'$set': {f'answers.{answer_data.question_id}': answer_data.selected_answer}}
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    if attempt["status"] != "in_progress":
+        raise HTTPException(status_code=400, detail="Attempt already completed")
+
+    await db.attempts.update_one(
+        {"id": attempt_id},
+        {"$set": {f"answers.{answer_data.question_id}": answer_data.selected_answer}},
     )
-    
-    return {'message': 'Answer saved'}
+    return {"message": "Answer saved"}
 
 @api_router.post("/attempts/{attempt_id}/submit", response_model=AttemptResponse)
 async def submit_attempt(attempt_id: str, current_user: dict = Depends(get_current_user)):
-    attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
+    attempt = await db.attempts.find_one({"id": attempt_id, "user_id": current_user["id"]}, {"_id": 0})
     if not attempt:
-        raise HTTPException(status_code=404, detail='Attempt not found')
-    
-    if attempt['status'] != 'in_progress':
-        raise HTTPException(status_code=400, detail='Attempt already completed')
-    
-    # Get all questions with correct answers
-    questions = await db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).to_list(1000)
-    
-    # Calculate score
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    if attempt["status"] != "in_progress":
+        raise HTTPException(status_code=400, detail="Attempt already completed")
+
+    questions = await db.questions.find({"exam_id": attempt["exam_id"]}, {"_id": 0}).to_list(1000)
+
     total_correct = 0
-    area_scores = {}
-    
+    area_scores: Dict[str, Dict[str, Any]] = {}
+
     for question in questions:
-        area = question['area']
-        if area not in area_scores:
-            area_scores[area] = {'correct': 0, 'total': 0}
-        
-        area_scores[area]['total'] += 1
-        
-        # Check if answered correctly
-        selected = attempt['answers'].get(question['id'])
-        if selected == question['correct_answer']:
+        area = question["area"]
+        area_scores.setdefault(area, {"correct": 0, "total": 0})
+
+        area_scores[area]["total"] += 1
+        selected = attempt.get("answers", {}).get(question["id"])
+        if selected == question["correct_answer"]:
             total_correct += 1
-            area_scores[area]['correct'] += 1
-    
-    # Calculate percentages
+            area_scores[area]["correct"] += 1
+
     for area in area_scores:
-        area_scores[area]['percentage'] = round(
-            (area_scores[area]['correct'] / area_scores[area]['total']) * 100, 2
-        ) if area_scores[area]['total'] > 0 else 0
-    
+        total = area_scores[area]["total"]
+        correct = area_scores[area]["correct"]
+        area_scores[area]["percentage"] = round((correct / total) * 100, 2) if total else 0
+
     score_data = {
-        'total_correct': total_correct,
-        'total_questions': len(questions),
-        'percentage': round((total_correct / len(questions)) * 100, 2) if len(questions) > 0 else 0,
-        'by_area': area_scores
+        "total_correct": total_correct,
+        "total_questions": len(questions),
+        "percentage": round((total_correct / len(questions)) * 100, 2) if questions else 0,
+        "by_area": area_scores,
     }
-    
-    # Update attempt
-    result = await db.attempts.update_one(
-        {'id': attempt_id},
-        {'$set': {
-            'status': 'completed',
-            'end_time': datetime.now(timezone.utc).isoformat(),
-            'score': score_data
-        }}
+
+    await db.attempts.update_one(
+        {"id": attempt_id},
+        {"$set": {"status": "completed", "end_time": datetime.now(timezone.utc).isoformat(), "score": score_data}},
     )
-    
-    attempt = await db.attempts.find_one({'id': attempt_id}, {'_id': 0})
+
+    attempt = await db.attempts.find_one({"id": attempt_id}, {"_id": 0})
     return AttemptResponse(**attempt)
 
 @api_router.get("/attempts", response_model=List[AttemptResponse])
 async def get_user_attempts(current_user: dict = Depends(get_current_user)):
-    attempts = await db.attempts.find({'user_id': current_user['id']}, {'_id': 0}).sort('start_time', -1).to_list(1000)
+    attempts = await db.attempts.find({"user_id": current_user["id"]}, {"_id": 0}).sort("start_time", -1).to_list(1000)
     return [AttemptResponse(**attempt) for attempt in attempts]
 
-# ===== USER ROUTES =====
+
+# =========================
+# USER ROUTES
+# =========================
 
 @api_router.put("/users/subscription")
 async def update_subscription(current_user: dict = Depends(get_current_user)):
-    # This is a mockup - in production would integrate with payment gateway
-    result = await db.users.update_one(
-        {'id': current_user['id']},
-        {'$set': {'subscription_status': 'premium'}}
-    )
-    
-    return {'message': 'Subscription updated to premium'}
+    await db.users.update_one({"id": current_user["id"]}, {"$set": {"subscription_status": "premium"}})
+    return {"message": "Subscription updated to premium"}
 
-# Include router
+
+# =========================
+# Wire-up
+# =========================
+
 app.include_router(api_router)
 
+# CORS: melhor deixar explícito no Render (Vercel domains)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS else [],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
