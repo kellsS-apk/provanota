@@ -1,0 +1,116 @@
+/* ProvaNota App Styles */
+
+.exam-timer {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: 1.125rem;
+  color: #1E3A8A;
+  background-color: #EFF6FF;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+}
+
+.question-number {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.question-number.answered {
+  background-color: #3B82F6;
+  color: white;
+}
+
+.question-number.current {
+  background-color: #1E3A8A;
+  color: white;
+  box-shadow: 0 0 15px rgba(59, 130, 246, 0.5);
+}
+
+.question-number.marked {
+  background-color: #F59E0B;
+  color: white;
+}
+
+.option-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid #E2E8F0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.option-row:hover {
+  background-color: #EFF6FF;
+  border-color: #3B82F6;
+}
+
+.option-row.selected {
+  background-color: #DBEAFE;
+  border-color: #1E3A8A;
+  border-width: 2px;
+}
+
+.ad-placeholder {
+  background: linear-gradient(135deg, #f5f5f5 0%, #e0e0e0 100%);
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+  color: #94A3B8;
+  font-size: 0.875rem;
+}
+
+.premium-badge {
+  background: linear-gradient(to right, #F59E0B, #F97316);
+  color: white;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.btn-primary {
+  background-color: #1E3A8A;
+  color: white;
+  border-radius: 9999px;
+  padding: 0.75rem 2rem;
+  font-weight: 600;
+  box-shadow: 0 10px 15px -3px rgba(30, 58, 138, 0.2);
+  transition: all 0.2s;
+}
+
+.btn-primary:hover {
+  background-color: #172554;
+  transform: scale(1.05);
+}
+
+.btn-primary:active {
+  transform: scale(0.95);
+}
+
+.btn-secondary {
+  background-color: white;
+  color: #1E3A8A;
+  border: 1px solid #E2E8F0;
+  border-radius: 9999px;
+  padding: 0.75rem 2rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  border-color: #CBD5E1;
+  background-color: #F8FAFC;
+}

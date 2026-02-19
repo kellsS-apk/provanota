@@ -1,0 +1,13 @@
+# ProvaNota
+
+*.pyc
+__pycache__/
+venv/
+node_modules/
+.env
+*.log
+.DS_Store
+.vscode/
+.idea/
+build/
+dist/
