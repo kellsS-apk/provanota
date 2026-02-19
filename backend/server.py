@@ -57,6 +57,7 @@ class UserRegister(BaseModel):
     name: str = Field(min_length=2, max_length=80)
 
 class UserLogin(BaseModel):
+    pass
 (BaseModel):
     email: EmailStr
     password: str
