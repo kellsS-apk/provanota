@@ -541,7 +541,11 @@ async def get_admin_questions(exam_id: str, current_user: dict = Depends(get_cur
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
-    questions = await db.questions.find({'exam_id': exam_id}, {'_id': 0}).sort('order', 1).to_list(1000)
+    # OPTIMIZED: Reasonable limit for exam questions (most exams have <200 questions)
+    questions = await db.questions.find(
+        {'exam_id': exam_id}, 
+        {'_id': 0}
+    ).sort('order', 1).to_list(500)
     return [QuestionResponse(**q) for q in questions]
 
 @api_router.put("/admin/questions/{question_id}", response_model=QuestionResponse)
