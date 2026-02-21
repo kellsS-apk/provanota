@@ -963,7 +963,7 @@ async def submit_attempt(attempt_id: str, current_user: dict = Depends(get_curre
     
     # Get questions based on exam_id or simulation_id
     if attempt.get('exam_id'):
-        questions = await db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).to_list(1000)
+        questions = await db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).to_list(500)
     elif attempt.get('simulation_id'):
         simulation = await db.simulations.find_one({'id': attempt['simulation_id']}, {'_id': 0})
         if not simulation:
