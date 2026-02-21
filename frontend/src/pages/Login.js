@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { login, register } from '../api';
 import { useAuth } from '../AuthContext';
 import { BookOpen, Mail, Lock, User } from 'lucide-react';
@@ -10,8 +10,7 @@ export default function Login() {
   const [formData, setFormData] = useState({
     email: '',
     password: '',
-    name: '',
-    role: 'student'
+    name: ''
   });
   const [loading, setLoading] = useState(false);
   const { loginUser } = useAuth();
@@ -24,7 +23,7 @@ export default function Login() {
     try {
       const response = isLogin 
         ? await login({ email: formData.email, password: formData.password })
-        : await register(formData);
+        : await register({ email: formData.email, password: formData.password, name: formData.name });
       
       loginUser(response.data.token, response.data.user);
       toast.success(isLogin ? 'Login realizado!' : 'Conta criada com sucesso!');
@@ -122,6 +121,7 @@ export default function Login() {
                 <input
                   type="password"
                   required
+                  minLength={8}
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                   className="w-full pl-10 pr-4 py-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-all"
@@ -129,24 +129,10 @@ export default function Login() {
                   data-testid="password-input"
                 />
               </div>
+              {!isLogin && (
+                <p className="text-xs text-slate-500 mt-1">Mínimo 8 caracteres</p>
+              )}
             </div>
-
-            {!isLogin && (
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
-                  Tipo de Conta
-                </label>
-                <select
-                  value={formData.role}
-                  onChange={(e) => setFormData({ ...formData, role: e.target.value })}
-                  className="w-full px-4 py-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-all"
-                  data-testid="role-select"
-                >
-                  <option value="student">Estudante</option>
-                  <option value="admin">Administrador</option>
-                </select>
-              </div>
-            )}
 
             <button
               type="submit"
