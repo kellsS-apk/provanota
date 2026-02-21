@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 
 class ProvaNoteAPITester:
-    def __init__(self, base_url="https://981170-provanota.preview.emergentagent.com"):
+    def __init__(self, base_url="http://localhost:8001"):
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
         self.student_token = None
