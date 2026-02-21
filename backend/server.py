@@ -1023,8 +1023,16 @@ async def submit_attempt(attempt_id: str, current_user: dict = Depends(get_curre
     return AttemptResponse(**attempt)
 
 @api_router.get("/attempts", response_model=List[AttemptResponse])
-async def get_user_attempts(current_user: dict = Depends(get_current_user)):
-    attempts = await db.attempts.find({'user_id': current_user['id']}, {'_id': 0}).sort('start_time', -1).to_list(1000)
+async def get_user_attempts(
+    current_user: dict = Depends(get_current_user),
+    limit: int = 50,
+    skip: int = 0
+):
+    # OPTIMIZED: Added pagination with reasonable defaults
+    attempts = await db.attempts.find(
+        {'user_id': current_user['id']}, 
+        {'_id': 0}
+    ).sort('start_time', -1).skip(skip).limit(min(limit, 100)).to_list(min(limit, 100))
     return [AttemptResponse(**attempt) for attempt in attempts]
 
 # ===== METADATA ROUTES =====
