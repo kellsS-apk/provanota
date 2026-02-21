@@ -1178,22 +1178,30 @@ async def startup_db():
         await db.exams.create_index("id", unique=True)
         await db.exams.create_index([("published", 1), ("year", -1)])
         
-        # Question indexes
+        # Question indexes - OPTIMIZED for scalability
         await db.questions.create_index("id", unique=True)
         await db.questions.create_index("question_hash", unique=True, sparse=True)
         await db.questions.create_index("exam_id")
+        await db.questions.create_index("year")  # Added for year_range queries
+        await db.questions.create_index("subject")  # Added for distinct() optimization
+        await db.questions.create_index("source_exam")  # Added for distinct() optimization
+        await db.questions.create_index("education_level")  # Added for distinct() optimization
+        await db.questions.create_index("difficulty")  # Added for filtering
         await db.questions.create_index([("subject", 1), ("education_level", 1)])
+        await db.questions.create_index([("subject", 1), ("difficulty", 1)])  # Common filter combo
         await db.questions.create_index([("exam_id", 1), ("order", 1)])
         
         # Simulation indexes
         await db.simulations.create_index("id", unique=True)
         await db.simulations.create_index("created_by")
+        await db.simulations.create_index([("created_by", 1), ("created_at", -1)])  # For listing user's simulations
         
         # Attempt indexes
         await db.attempts.create_index("id", unique=True)
         await db.attempts.create_index("user_id")
         await db.attempts.create_index("exam_id")
         await db.attempts.create_index("simulation_id")
+        await db.attempts.create_index([("user_id", 1), ("status", 1)])  # For in-progress queries
         await db.attempts.create_index([("user_id", 1), ("start_time", -1)])
         
         logger.info("MongoDB indexes created successfully.")
