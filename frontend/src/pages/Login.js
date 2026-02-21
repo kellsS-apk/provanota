@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { login, register } from '../api';
+import { login, register, API_URL } from '../api';
 import { useAuth } from '../AuthContext';
 import { BookOpen, Mail, Lock, User } from 'lucide-react';
 import { toast } from 'sonner';
@@ -34,8 +34,30 @@ export default function Login() {
         navigate('/dashboard');
       }
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Erro ao autenticar');
-    } finally {
+  console.error('Auth error:', error);
+
+  const status = error?.response?.status;
+  const detail =
+    error?.response?.data?.detail ||
+    error?.response?.data?.message ||
+    (Array.isArray(error?.response?.data) ? JSON.stringify(error.response.data) : null);
+
+  // Network / CORS / backend asleep (Render free tier)
+  if (!error?.response) {
+    toast.error(
+      `Não consegui falar com o backend (${API_URL}). Verifique se o backend está online e se o CORS permite o domínio do Vercel.`
+    );
+  } else if (status === 401) {
+    toast.error(detail || 'Email ou senha inválidos.');
+  } else if (status === 409) {
+    toast.error(detail || 'Este email já está cadastrado.');
+  } else if (status === 422) {
+    toast.error(detail || 'Dados inválidos. Confira os campos e tente novamente.');
+  } else {
+    toast.error(detail || 'Ocorreu um erro. Tente novamente.');
+  }
+} finally {
+
       setLoading(false);
     }
   };
