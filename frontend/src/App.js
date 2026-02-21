@@ -14,6 +14,8 @@ import Profile from './pages/Profile';
 import AdminDashboard from './pages/AdminDashboard';
 import ExamForm from './pages/ExamForm';
 import QuestionManager from './pages/QuestionManager';
+import CreateSimulation from './pages/CreateSimulation';
+import MySimulations from './pages/MySimulations';
 
 // Protected Route Component
 const ProtectedRoute = ({ children, adminOnly = false }) => {
@@ -92,6 +94,19 @@ function AppRoutes() {
       <Route path="/profile" element={
         <ProtectedRoute>
           <Profile />
+        </ProtectedRoute>
+      } />
+
+      {/* Simulation Routes */}
+      <Route path="/simulations/create" element={
+        <ProtectedRoute>
+          <CreateSimulation />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/simulations/my" element={
+        <ProtectedRoute>
+          <MySimulations />
         </ProtectedRoute>
       } />
 
