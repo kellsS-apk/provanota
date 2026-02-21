@@ -401,14 +401,23 @@ async def get_admin_exams(current_user: dict = Depends(get_current_user)):
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
-    exams = await db.exams.find({}, {'_id': 0}).to_list(1000)
+    # OPTIMIZED: Use aggregation with $lookup to avoid N+1 queries
+    pipeline = [
+        {'$lookup': {
+            'from': 'questions',
+            'localField': 'id',
+            'foreignField': 'exam_id',
+            'as': 'questions_list'
+        }},
+        {'$addFields': {
+            'question_count': {'$size': '$questions_list'},
+            'education_level': {'$ifNull': ['$education_level', 'vestibular']}
+        }},
+        {'$project': {'questions_list': 0, '_id': 0}},
+        {'$sort': {'created_at': -1}}
+    ]
     
-    for exam in exams:
-        count = await db.questions.count_documents({'exam_id': exam['id']})
-        exam['question_count'] = count
-        if 'education_level' not in exam:
-            exam['education_level'] = 'vestibular'
-    
+    exams = await db.exams.aggregate(pipeline).to_list(200)
     return [ExamResponse(**exam) for exam in exams]
 
 @api_router.get("/admin/exams/{exam_id}", response_model=ExamResponse)
@@ -633,14 +642,24 @@ async def import_questions(import_data: ImportQuestionsRequest, current_user: di
 
 @api_router.get("/exams", response_model=List[ExamResponse])
 async def get_exams(current_user: dict = Depends(get_current_user)):
-    exams = await db.exams.find({'published': True}, {'_id': 0}).to_list(1000)
+    # OPTIMIZED: Use aggregation with $lookup to avoid N+1 queries
+    pipeline = [
+        {'$match': {'published': True}},
+        {'$lookup': {
+            'from': 'questions',
+            'localField': 'id',
+            'foreignField': 'exam_id',
+            'as': 'questions_list'
+        }},
+        {'$addFields': {
+            'question_count': {'$size': '$questions_list'},
+            'education_level': {'$ifNull': ['$education_level', 'vestibular']}
+        }},
+        {'$project': {'questions_list': 0, '_id': 0}},
+        {'$sort': {'year': -1}}
+    ]
     
-    for exam in exams:
-        count = await db.questions.count_documents({'exam_id': exam['id']})
-        exam['question_count'] = count
-        if 'education_level' not in exam:
-            exam['education_level'] = 'vestibular'
-    
+    exams = await db.exams.aggregate(pipeline).to_list(100)
     return [ExamResponse(**exam) for exam in exams]
 
 @api_router.get("/exams/{exam_id}", response_model=ExamResponse)
