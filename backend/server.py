@@ -7,11 +7,13 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 import uuid
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
+import hashlib
+import re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -29,31 +31,97 @@ JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 # Admin bootstrap: comma-separated list of emails that should be admins on registration
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()}
 
-# CORS origins: comma-separated list (recommended: your Vercel domains + localhost for dev)
+# CORS origins: comma-separated list
 def _parse_origins(raw: str):
-    return [o.strip() for o in (raw or '').split(',') if o.strip()]
+    origins = []
+    for o in (raw or '').split(','):
+        o = o.strip()
+        if o:
+            origins.append(o)
+    return origins
 
 CORS_ORIGINS = _parse_origins(os.environ.get('CORS_ORIGINS', 'http://localhost:3000'))
 
 # Safety: require a JWT secret in production
 if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET is required. Set it in your environment (Render).")
+    raise RuntimeError("JWT_SECRET is required. Set it in your environment.")
+
+# ===== ENUMS AND CONSTANTS =====
+
+EDUCATION_LEVELS = ["escola", "vestibular", "faculdade"]
+DIFFICULTIES = ["easy", "medium", "hard"]
+AREAS_ENEM = ["Linguagens", "Humanas", "Natureza", "Matemática"]
+
+VALID_SUBJECTS = [
+    "Matemática", "Português", "Literatura", "Inglês", "Espanhol",
+    "História", "Geografia", "Filosofia", "Sociologia",
+    "Física", "Química", "Biologia",
+    "Cálculo", "Álgebra Linear", "Estatística", "Programação",
+    "Direito Constitucional", "Administração", "Contabilidade"
+]
+
+TOPICS_BY_SUBJECT = {
+    "Matemática": ["Álgebra", "Geometria", "Trigonometria", "Funções", "Probabilidade", "Estatística", "Aritmética"],
+    "Português": ["Gramática", "Interpretação", "Redação", "Ortografia", "Sintaxe", "Semântica"],
+    "Literatura": ["Romantismo", "Realismo", "Modernismo", "Barroco", "Arcadismo", "Contemporânea"],
+    "Inglês": ["Grammar", "Reading", "Vocabulary", "Interpretation"],
+    "Espanhol": ["Gramática", "Lectura", "Vocabulario", "Interpretación"],
+    "História": ["Brasil Colônia", "Brasil Império", "Brasil República", "História Antiga", "Idade Média", "Era Moderna", "Contemporânea"],
+    "Geografia": ["Cartografia", "Climatologia", "Geopolítica", "Urbanização", "Meio Ambiente", "Globalização"],
+    "Filosofia": ["Ética", "Epistemologia", "Metafísica", "Filosofia Política", "Lógica"],
+    "Sociologia": ["Clássicos", "Cultura", "Trabalho", "Desigualdade", "Movimentos Sociais"],
+    "Física": ["Mecânica", "Termodinâmica", "Óptica", "Eletricidade", "Ondas", "Física Moderna"],
+    "Química": ["Química Orgânica", "Química Inorgânica", "Físico-Química", "Estequiometria"],
+    "Biologia": ["Citologia", "Genética", "Ecologia", "Evolução", "Fisiologia", "Botânica", "Zoologia"],
+    "Cálculo": ["Limites", "Derivadas", "Integrais", "Séries"],
+    "Álgebra Linear": ["Matrizes", "Vetores", "Sistemas Lineares", "Transformações"],
+    "Estatística": ["Descritiva", "Inferencial", "Probabilidade", "Regressão"],
+    "Programação": ["Algoritmos", "Estruturas de Dados", "POO", "Web"],
+    "Direito Constitucional": ["Princípios", "Direitos Fundamentais", "Organização do Estado"],
+    "Administração": ["Gestão", "Marketing", "Finanças", "RH"],
+    "Contabilidade": ["Balanço", "DRE", "Custos", "Tributária"]
+}
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison and hashing"""
+    if not text:
+        return ""
+    # Remove extra whitespace, lowercase, strip
+    return re.sub(r'\s+', ' ', text.strip().lower())
+
+def calculate_question_hash(statement: str, alternatives: List[dict], source_exam: str, year: Optional[int]) -> str:
+    """Calculate unique hash for question to prevent duplicates"""
+    alt_text = ''.join(sorted([f"{a['letter']}:{a['text']}" for a in alternatives]))
+    raw = f"{normalize_text(statement)}|{normalize_text(alt_text)}|{normalize_text(source_exam)}|{year or ''}"
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def normalize_subject(subject: str) -> str:
+    """Normalize subject name with proper capitalization"""
+    if not subject:
+        return subject
+    subject = subject.strip()
+    # Check if it matches any valid subject (case-insensitive)
+    for valid in VALID_SUBJECTS:
+        if subject.lower() == valid.lower():
+            return valid
+    return subject.title()
 
 # Create the main app
 app = FastAPI()
+
 @app.get("/")
 def root():
     return {"message": "API ProvaNota funcionando 🚀"}
+
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
 # ===== MODELS =====
 
 class UserRegister(BaseModel):
-    # Ignore extra fields sent by the client (e.g., a malicious 'role')
     model_config = ConfigDict(extra="ignore")
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72)  # bcrypt effective limit ~72 bytes
+    password: str = Field(min_length=8, max_length=72)
     name: str = Field(min_length=2, max_length=80)
 
 class UserLogin(BaseModel):
@@ -75,7 +143,8 @@ class ExamCreate(BaseModel):
     banca: str
     duration_minutes: int
     instructions: str
-    areas: List[str]  # ['Linguagens', 'Humanas', 'Natureza', 'Matemática']
+    areas: List[str]
+    education_level: Optional[str] = "vestibular"
 
 class ExamResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -90,24 +159,13 @@ class ExamResponse(BaseModel):
     created_by: str
     created_at: str
     question_count: int = 0
+    education_level: str = "vestibular"
 
 class Alternative(BaseModel):
-    letter: str  # A, B, C, D, E
+    letter: str
     text: str
 
 class QuestionCreate(BaseModel):
-    exam_id: str
-    statement: str
-    image_url: Optional[str] = None
-    alternatives: List[Alternative]
-    correct_answer: str  # A, B, C, D, or E
-    tags: List[str]
-    difficulty: str  # 'easy', 'medium', 'hard'
-    area: str  # Linguagens, Humanas, Natureza, Matemática
-
-class QuestionResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
     exam_id: str
     statement: str
     image_url: Optional[str] = None
@@ -116,41 +174,124 @@ class QuestionResponse(BaseModel):
     tags: List[str]
     difficulty: str
     area: str
-    order: int
 
-class QuestionResponseStudent(BaseModel):
+class QuestionCreateV2(BaseModel):
+    """Extended question model for V2"""
+    exam_id: Optional[str] = None
+    statement: str
+    image_url: Optional[str] = None
+    alternatives: List[Alternative]
+    correct_answer: Literal["A", "B", "C", "D", "E"]
+    tags: List[str] = []
+    difficulty: Literal["easy", "medium", "hard"]
+    area: Optional[str] = None
+    subject: str
+    topic: str
+    education_level: Literal["escola", "vestibular", "faculdade"] = "vestibular"
+    source_exam: str
+    year: Optional[int] = None
+
+class QuestionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
-    exam_id: str
+    exam_id: Optional[str] = None
+    statement: str
+    image_url: Optional[str] = None
+    alternatives: List[Alternative]
+    correct_answer: str
+    tags: List[str]
+    difficulty: str
+    area: Optional[str] = None
+    order: int = 0
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    education_level: str = "vestibular"
+    source_exam: Optional[str] = None
+    year: Optional[int] = None
+
+class QuestionResponseStudent(BaseModel):
+    """Question without correct_answer for students"""
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    exam_id: Optional[str] = None
     statement: str
     image_url: Optional[str] = None
     alternatives: List[Alternative]
     tags: List[str]
     difficulty: str
-    area: str
-    order: int
+    area: Optional[str] = None
+    order: int = 0
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    education_level: str = "vestibular"
+    source_exam: Optional[str] = None
+    year: Optional[int] = None
 
+# Simulation Models
+class SimulationGenerateRequest(BaseModel):
+    subjects: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    education_level: Optional[str] = None
+    difficulty: Optional[str] = None
+    sources: Optional[List[str]] = None
+    year_range: Optional[List[int]] = None  # [min_year, max_year]
+    limit: int = Field(default=10, ge=1, le=100)
+    type: Literal["custom", "mixed"] = "custom"
+
+class SimulationResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    type: str
+    criteria: Dict[str, Any]
+    question_ids: List[str]
+    question_count: int
+    created_by: str
+    created_at: str
+
+# Attempt Models
 class AttemptCreate(BaseModel):
-    exam_id: str
+    exam_id: Optional[str] = None
+
+class AttemptCreateSimulation(BaseModel):
+    pass
 
 class AnswerSubmit(BaseModel):
     question_id: str
-    selected_answer: str  # A, B, C, D, E
+    selected_answer: str
 
 class AttemptResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
     user_id: str
-    exam_id: str
-    exam_title: str
+    exam_id: Optional[str] = None
+    simulation_id: Optional[str] = None
+    exam_title: Optional[str] = None
+    mode: str = "official"
     start_time: str
     end_time: Optional[str] = None
-    status: str  # 'in_progress' or 'completed'
-    answers: Dict[str, str] = {}  # question_id -> selected_answer
+    status: str
+    answers: Dict[str, str] = {}
     score: Optional[Dict[str, Any]] = None
+    duration_seconds: Optional[int] = None
 
-class AttemptSubmit(BaseModel):
-    pass  # No body needed, just trigger submission
+# Import Model
+class QuestionImport(BaseModel):
+    statement: str
+    image_url: Optional[str] = None
+    alternatives: List[Alternative]
+    correct_answer: Literal["A", "B", "C", "D", "E"]
+    tags: List[str] = []
+    difficulty: Literal["easy", "medium", "hard"]
+    area: Optional[str] = None
+    subject: str
+    topic: str
+    education_level: Literal["escola", "vestibular", "faculdade"] = "vestibular"
+    source_exam: str
+    year: Optional[int] = None
+    exam_id: Optional[str] = None
+
+class ImportQuestionsRequest(BaseModel):
+    questions: List[QuestionImport]
 
 # ===== AUTH HELPERS =====
 
@@ -190,19 +331,20 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 @api_router.post("/auth/register", response_model=dict)
 async def register(user_data: UserRegister):
-    # Check if user exists
     existing = await db.users.find_one({'email': user_data.email}, {'_id': 0})
     if existing:
         raise HTTPException(status_code=400, detail='Email already registered')
     
-    # Create user
     user_id = str(uuid.uuid4())
+    # SECURITY: Always create as student, check whitelist for admin
+    role = 'admin' if user_data.email.lower() in ADMIN_EMAILS else 'student'
+    
     user_doc = {
         'id': user_id,
         'email': user_data.email,
         'password_hash': hash_password(user_data.password),
         'name': user_data.name,
-        'role': ('admin' if user_data.email.lower() in ADMIN_EMAILS else 'student'),
+        'role': role,
         'subscription_status': 'free',
         'preferred_exam': None,
         'created_at': datetime.now(timezone.utc).isoformat()
@@ -245,6 +387,7 @@ async def create_exam(exam_data: ExamCreate, current_user: dict = Depends(get_cu
         'duration_minutes': exam_data.duration_minutes,
         'instructions': exam_data.instructions,
         'areas': exam_data.areas,
+        'education_level': exam_data.education_level or 'vestibular',
         'published': False,
         'created_by': current_user['id'],
         'created_at': datetime.now(timezone.utc).isoformat()
@@ -260,10 +403,11 @@ async def get_admin_exams(current_user: dict = Depends(get_current_user)):
     
     exams = await db.exams.find({}, {'_id': 0}).to_list(1000)
     
-    # Get question counts
     for exam in exams:
         count = await db.questions.count_documents({'exam_id': exam['id']})
         exam['question_count'] = count
+        if 'education_level' not in exam:
+            exam['education_level'] = 'vestibular'
     
     return [ExamResponse(**exam) for exam in exams]
 
@@ -278,6 +422,8 @@ async def get_admin_exam(exam_id: str, current_user: dict = Depends(get_current_
     
     count = await db.questions.count_documents({'exam_id': exam_id})
     exam['question_count'] = count
+    if 'education_level' not in exam:
+        exam['education_level'] = 'vestibular'
     
     return ExamResponse(**exam)
 
@@ -286,9 +432,10 @@ async def update_exam(exam_id: str, exam_data: ExamCreate, current_user: dict = 
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
+    update_data = exam_data.model_dump()
     result = await db.exams.update_one(
         {'id': exam_id},
-        {'$set': exam_data.model_dump()}
+        {'$set': update_data}
     )
     
     if result.matched_count == 0:
@@ -305,9 +452,7 @@ async def delete_exam(exam_id: str, current_user: dict = Depends(get_current_use
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
-    # Delete all questions first
     await db.questions.delete_many({'exam_id': exam_id})
-    
     result = await db.exams.delete_one({'id': exam_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail='Exam not found')
@@ -351,7 +496,6 @@ async def create_question(question_data: QuestionCreate, current_user: dict = De
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
-    # Get current question count for ordering
     count = await db.questions.count_documents({'exam_id': question_data.exam_id})
     
     question_id = str(uuid.uuid4())
@@ -365,7 +509,19 @@ async def create_question(question_data: QuestionCreate, current_user: dict = De
         'tags': question_data.tags,
         'difficulty': question_data.difficulty,
         'area': question_data.area,
-        'order': count + 1
+        'order': count + 1,
+        'subject': question_data.area,
+        'topic': '',
+        'education_level': 'vestibular',
+        'source_exam': '',
+        'year': None,
+        'question_hash': calculate_question_hash(
+            question_data.statement,
+            [alt.model_dump() for alt in question_data.alternatives],
+            '',
+            None
+        ),
+        'created_at': datetime.now(timezone.utc).isoformat()
     }
     
     await db.questions.insert_one(question_doc)
@@ -384,16 +540,15 @@ async def update_question(question_id: str, question_data: QuestionCreate, curre
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail='Admin access required')
     
-    # Get existing order
     existing = await db.questions.find_one({'id': question_id}, {'_id': 0})
     if not existing:
         raise HTTPException(status_code=404, detail='Question not found')
     
     update_data = question_data.model_dump()
     update_data['alternatives'] = [alt.model_dump() for alt in question_data.alternatives]
-    update_data['order'] = existing['order']
+    update_data['order'] = existing.get('order', 0)
     
-    result = await db.questions.update_one(
+    await db.questions.update_one(
         {'id': question_id},
         {'$set': update_data}
     )
@@ -412,16 +567,79 @@ async def delete_question(question_id: str, current_user: dict = Depends(get_cur
     
     return {'message': 'Question deleted successfully'}
 
+# ===== ADMIN IMPORT QUESTIONS =====
+
+@api_router.post("/admin/import/questions")
+async def import_questions(import_data: ImportQuestionsRequest, current_user: dict = Depends(get_current_user)):
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail='Admin access required')
+    
+    inserted = 0
+    skipped_duplicates = 0
+    errors = []
+    
+    for idx, q in enumerate(import_data.questions):
+        # Normalize subject
+        subject = normalize_subject(q.subject)
+        
+        # Calculate hash
+        q_hash = calculate_question_hash(
+            q.statement,
+            [alt.model_dump() for alt in q.alternatives],
+            q.source_exam,
+            q.year
+        )
+        
+        # Check for duplicate
+        existing = await db.questions.find_one({'question_hash': q_hash})
+        if existing:
+            skipped_duplicates += 1
+            continue
+        
+        question_id = str(uuid.uuid4())
+        question_doc = {
+            'id': question_id,
+            'exam_id': q.exam_id,
+            'statement': q.statement,
+            'image_url': q.image_url,
+            'alternatives': [alt.model_dump() for alt in q.alternatives],
+            'correct_answer': q.correct_answer,
+            'tags': q.tags,
+            'difficulty': q.difficulty,
+            'area': q.area,
+            'subject': subject,
+            'topic': q.topic.strip() if q.topic else '',
+            'education_level': q.education_level,
+            'source_exam': q.source_exam.strip() if q.source_exam else '',
+            'year': q.year,
+            'question_hash': q_hash,
+            'order': 0,
+            'created_at': datetime.now(timezone.utc).isoformat()
+        }
+        
+        try:
+            await db.questions.insert_one(question_doc)
+            inserted += 1
+        except Exception as e:
+            errors.append(f"Question {idx}: {str(e)}")
+    
+    return {
+        'inserted': inserted,
+        'skipped_duplicates': skipped_duplicates,
+        'errors': errors if errors else None
+    }
+
 # ===== STUDENT EXAM ROUTES =====
 
 @api_router.get("/exams", response_model=List[ExamResponse])
 async def get_exams(current_user: dict = Depends(get_current_user)):
     exams = await db.exams.find({'published': True}, {'_id': 0}).to_list(1000)
     
-    # Get question counts
     for exam in exams:
         count = await db.questions.count_documents({'exam_id': exam['id']})
         exam['question_count'] = count
+        if 'education_level' not in exam:
+            exam['education_level'] = 'vestibular'
     
     return [ExamResponse(**exam) for exam in exams]
 
@@ -433,39 +651,221 @@ async def get_exam(exam_id: str, current_user: dict = Depends(get_current_user))
     
     count = await db.questions.count_documents({'exam_id': exam_id})
     exam['question_count'] = count
+    if 'education_level' not in exam:
+        exam['education_level'] = 'vestibular'
     
     return ExamResponse(**exam)
 
 @api_router.get("/exams/{exam_id}/questions", response_model=List[QuestionResponseStudent])
 async def get_exam_questions(exam_id: str, current_user: dict = Depends(get_current_user)):
-    # Check if exam is published
     exam = await db.exams.find_one({'id': exam_id, 'published': True}, {'_id': 0})
     if not exam:
         raise HTTPException(status_code=404, detail='Exam not found')
     
-    questions = await db.questions.find({'exam_id': exam_id}, {'_id': 0, 'correct_answer': 0}).sort('order', 1).to_list(1000)
+    questions = await db.questions.find(
+        {'exam_id': exam_id}, 
+        {'_id': 0, 'correct_answer': 0, 'question_hash': 0}
+    ).sort('order', 1).to_list(1000)
     return [QuestionResponseStudent(**q) for q in questions]
+
+# ===== SIMULATION ROUTES =====
+
+@api_router.post("/simulations/generate", response_model=SimulationResponse)
+async def generate_simulation(criteria: SimulationGenerateRequest, current_user: dict = Depends(get_current_user)):
+    """Generate a custom simulation based on criteria"""
+    
+    # Build match pipeline
+    match_conditions = []
+    
+    if criteria.subjects:
+        # Validate subjects for public endpoints
+        normalized_subjects = [normalize_subject(s) for s in criteria.subjects]
+        for s in normalized_subjects:
+            if s not in VALID_SUBJECTS:
+                raise HTTPException(status_code=400, detail=f'Invalid subject: {s}')
+        match_conditions.append({'subject': {'$in': normalized_subjects}})
+    
+    if criteria.topics:
+        match_conditions.append({'topic': {'$in': criteria.topics}})
+    
+    if criteria.education_level:
+        if criteria.education_level not in EDUCATION_LEVELS:
+            raise HTTPException(status_code=400, detail=f'Invalid education_level: {criteria.education_level}')
+        match_conditions.append({'education_level': criteria.education_level})
+    
+    if criteria.difficulty:
+        if criteria.difficulty not in DIFFICULTIES:
+            raise HTTPException(status_code=400, detail=f'Invalid difficulty: {criteria.difficulty}')
+        match_conditions.append({'difficulty': criteria.difficulty})
+    
+    if criteria.sources:
+        match_conditions.append({'source_exam': {'$in': criteria.sources}})
+    
+    if criteria.year_range and len(criteria.year_range) == 2:
+        match_conditions.append({
+            'year': {'$gte': criteria.year_range[0], '$lte': criteria.year_range[1]}
+        })
+    
+    # Build aggregation pipeline
+    pipeline = []
+    
+    if match_conditions:
+        pipeline.append({'$match': {'$and': match_conditions}})
+    
+    # Use $sample for random selection - efficient MongoDB aggregation
+    pipeline.append({'$sample': {'size': criteria.limit}})
+    pipeline.append({'$project': {'_id': 0, 'id': 1}})
+    
+    # Execute aggregation
+    cursor = db.questions.aggregate(pipeline)
+    results = await cursor.to_list(criteria.limit)
+    
+    question_ids = [r['id'] for r in results]
+    
+    if len(question_ids) < 1:
+        raise HTTPException(
+            status_code=400, 
+            detail='Não há questões suficientes com os filtros selecionados'
+        )
+    
+    # Create simulation
+    simulation_id = str(uuid.uuid4())
+    simulation_doc = {
+        'id': simulation_id,
+        'type': criteria.type,
+        'criteria': criteria.model_dump(),
+        'question_ids': question_ids,
+        'created_by': current_user['id'],
+        'created_at': datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.simulations.insert_one(simulation_doc)
+    
+    return SimulationResponse(
+        **simulation_doc,
+        question_count=len(question_ids)
+    )
+
+@api_router.get("/simulations/my", response_model=List[SimulationResponse])
+async def get_my_simulations(current_user: dict = Depends(get_current_user)):
+    """List user's simulations"""
+    simulations = await db.simulations.find(
+        {'created_by': current_user['id']},
+        {'_id': 0}
+    ).sort('created_at', -1).to_list(100)
+    
+    return [SimulationResponse(**s, question_count=len(s.get('question_ids', []))) for s in simulations]
+
+@api_router.get("/simulations/{simulation_id}", response_model=SimulationResponse)
+async def get_simulation(simulation_id: str, current_user: dict = Depends(get_current_user)):
+    """Get simulation details"""
+    simulation = await db.simulations.find_one({'id': simulation_id}, {'_id': 0})
+    
+    if not simulation:
+        raise HTTPException(status_code=404, detail='Simulation not found')
+    
+    if simulation['created_by'] != current_user['id']:
+        raise HTTPException(status_code=403, detail='Access denied')
+    
+    return SimulationResponse(
+        **simulation,
+        question_count=len(simulation.get('question_ids', []))
+    )
+
+@api_router.get("/simulations/{simulation_id}/questions", response_model=List[QuestionResponseStudent])
+async def get_simulation_questions(simulation_id: str, current_user: dict = Depends(get_current_user)):
+    """Get simulation questions (without correct answers)"""
+    simulation = await db.simulations.find_one({'id': simulation_id}, {'_id': 0})
+    
+    if not simulation:
+        raise HTTPException(status_code=404, detail='Simulation not found')
+    
+    if simulation['created_by'] != current_user['id']:
+        raise HTTPException(status_code=403, detail='Access denied')
+    
+    question_ids = simulation.get('question_ids', [])
+    
+    if not question_ids:
+        return []
+    
+    # Fetch questions without correct_answer
+    questions = await db.questions.find(
+        {'id': {'$in': question_ids}},
+        {'_id': 0, 'correct_answer': 0, 'question_hash': 0}
+    ).to_list(len(question_ids))
+    
+    # Maintain order
+    id_to_question = {q['id']: q for q in questions}
+    ordered_questions = []
+    for idx, qid in enumerate(question_ids):
+        if qid in id_to_question:
+            q = id_to_question[qid]
+            q['order'] = idx + 1
+            ordered_questions.append(q)
+    
+    return [QuestionResponseStudent(**q) for q in ordered_questions]
+
+@api_router.post("/simulations/{simulation_id}/attempt", response_model=AttemptResponse)
+async def create_simulation_attempt(simulation_id: str, current_user: dict = Depends(get_current_user)):
+    """Create an attempt for a simulation"""
+    simulation = await db.simulations.find_one({'id': simulation_id}, {'_id': 0})
+    
+    if not simulation:
+        raise HTTPException(status_code=404, detail='Simulation not found')
+    
+    if simulation['created_by'] != current_user['id']:
+        raise HTTPException(status_code=403, detail='Access denied')
+    
+    attempt_id = str(uuid.uuid4())
+    question_count = len(simulation.get('question_ids', []))
+    # 1 minute per question as default duration
+    duration_seconds = question_count * 60
+    
+    attempt_doc = {
+        'id': attempt_id,
+        'user_id': current_user['id'],
+        'exam_id': None,
+        'simulation_id': simulation_id,
+        'exam_title': f"Simulado Personalizado ({question_count} questões)",
+        'mode': 'generated',
+        'start_time': datetime.now(timezone.utc).isoformat(),
+        'end_time': None,
+        'status': 'in_progress',
+        'answers': {},
+        'score': None,
+        'duration_seconds': duration_seconds
+    }
+    
+    await db.attempts.insert_one(attempt_doc)
+    return AttemptResponse(**attempt_doc)
 
 # ===== ATTEMPT ROUTES =====
 
 @api_router.post("/attempts", response_model=AttemptResponse)
 async def create_attempt(attempt_data: AttemptCreate, current_user: dict = Depends(get_current_user)):
-    # Check if exam exists and is published
+    if not attempt_data.exam_id:
+        raise HTTPException(status_code=400, detail='exam_id is required')
+    
     exam = await db.exams.find_one({'id': attempt_data.exam_id, 'published': True}, {'_id': 0})
     if not exam:
         raise HTTPException(status_code=404, detail='Exam not found')
     
     attempt_id = str(uuid.uuid4())
+    duration_seconds = exam.get('duration_minutes', 60) * 60
+    
     attempt_doc = {
         'id': attempt_id,
         'user_id': current_user['id'],
         'exam_id': attempt_data.exam_id,
+        'simulation_id': None,
         'exam_title': exam['title'],
+        'mode': 'official',
         'start_time': datetime.now(timezone.utc).isoformat(),
         'end_time': None,
         'status': 'in_progress',
         'answers': {},
-        'score': None
+        'score': None,
+        'duration_seconds': duration_seconds
     }
     
     await db.attempts.insert_one(attempt_doc)
@@ -488,8 +888,7 @@ async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: 
     if attempt['status'] != 'in_progress':
         raise HTTPException(status_code=400, detail='Attempt already completed')
     
-    # Update answer
-    result = await db.attempts.update_one(
+    await db.attempts.update_one(
         {'id': attempt_id},
         {'$set': {f'answers.{answer_data.question_id}': answer_data.selected_answer}}
     )
@@ -505,25 +904,40 @@ async def submit_attempt(attempt_id: str, current_user: dict = Depends(get_curre
     if attempt['status'] != 'in_progress':
         raise HTTPException(status_code=400, detail='Attempt already completed')
     
-    # Get all questions with correct answers
-    questions = await db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).to_list(1000)
+    # Get questions based on exam_id or simulation_id
+    if attempt.get('exam_id'):
+        questions = await db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).to_list(1000)
+    elif attempt.get('simulation_id'):
+        simulation = await db.simulations.find_one({'id': attempt['simulation_id']}, {'_id': 0})
+        if not simulation:
+            raise HTTPException(status_code=404, detail='Simulation not found')
+        question_ids = simulation.get('question_ids', [])
+        questions = await db.questions.find({'id': {'$in': question_ids}}, {'_id': 0}).to_list(len(question_ids))
+    else:
+        raise HTTPException(status_code=400, detail='Invalid attempt: no exam or simulation')
     
     # Calculate score
     total_correct = 0
     area_scores = {}
+    subject_scores = {}
     
     for question in questions:
-        area = question['area']
+        area = question.get('area') or question.get('subject') or 'Geral'
+        subject = question.get('subject') or area
+        
         if area not in area_scores:
             area_scores[area] = {'correct': 0, 'total': 0}
+        if subject not in subject_scores:
+            subject_scores[subject] = {'correct': 0, 'total': 0}
         
         area_scores[area]['total'] += 1
+        subject_scores[subject]['total'] += 1
         
-        # Check if answered correctly
         selected = attempt['answers'].get(question['id'])
         if selected == question['correct_answer']:
             total_correct += 1
             area_scores[area]['correct'] += 1
+            subject_scores[subject]['correct'] += 1
     
     # Calculate percentages
     for area in area_scores:
@@ -531,15 +945,20 @@ async def submit_attempt(attempt_id: str, current_user: dict = Depends(get_curre
             (area_scores[area]['correct'] / area_scores[area]['total']) * 100, 2
         ) if area_scores[area]['total'] > 0 else 0
     
+    for subject in subject_scores:
+        subject_scores[subject]['percentage'] = round(
+            (subject_scores[subject]['correct'] / subject_scores[subject]['total']) * 100, 2
+        ) if subject_scores[subject]['total'] > 0 else 0
+    
     score_data = {
         'total_correct': total_correct,
         'total_questions': len(questions),
         'percentage': round((total_correct / len(questions)) * 100, 2) if len(questions) > 0 else 0,
-        'by_area': area_scores
+        'by_area': area_scores,
+        'by_subject': subject_scores
     }
     
-    # Update attempt
-    result = await db.attempts.update_one(
+    await db.attempts.update_one(
         {'id': attempt_id},
         {'$set': {
             'status': 'completed',
@@ -556,17 +975,127 @@ async def get_user_attempts(current_user: dict = Depends(get_current_user)):
     attempts = await db.attempts.find({'user_id': current_user['id']}, {'_id': 0}).sort('start_time', -1).to_list(1000)
     return [AttemptResponse(**attempt) for attempt in attempts]
 
+# ===== METADATA ROUTES =====
+
+@api_router.get("/metadata/subjects")
+async def get_subjects():
+    """Get list of valid subjects"""
+    return {"subjects": VALID_SUBJECTS}
+
+@api_router.get("/metadata/topics/{subject}")
+async def get_topics(subject: str):
+    """Get topics for a subject"""
+    normalized = normalize_subject(subject)
+    topics = TOPICS_BY_SUBJECT.get(normalized, [])
+    return {"subject": normalized, "topics": topics}
+
+@api_router.get("/metadata/filters")
+async def get_filter_options():
+    """Get available filter options from existing questions"""
+    # Get unique values from questions collection
+    subjects = await db.questions.distinct('subject')
+    sources = await db.questions.distinct('source_exam')
+    education_levels = await db.questions.distinct('education_level')
+    
+    # Get year range
+    pipeline = [
+        {'$match': {'year': {'$ne': None}}},
+        {'$group': {'_id': None, 'min_year': {'$min': '$year'}, 'max_year': {'$max': '$year'}}}
+    ]
+    year_result = await db.questions.aggregate(pipeline).to_list(1)
+    year_range = year_result[0] if year_result else {'min_year': 2010, 'max_year': 2024}
+    
+    # Get question count
+    total_questions = await db.questions.count_documents({})
+    
+    return {
+        'subjects': [s for s in subjects if s],
+        'sources': [s for s in sources if s],
+        'education_levels': [e for e in education_levels if e] or EDUCATION_LEVELS,
+        'difficulties': DIFFICULTIES,
+        'year_range': [year_range.get('min_year', 2010), year_range.get('max_year', 2024)],
+        'total_questions': total_questions,
+        'valid_subjects': VALID_SUBJECTS
+    }
+
+@api_router.get("/metadata/question-count")
+async def get_question_count(
+    subjects: Optional[str] = None,
+    education_level: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    sources: Optional[str] = None
+):
+    """Get count of questions matching filters"""
+    match_conditions = []
+    
+    if subjects:
+        subject_list = [normalize_subject(s.strip()) for s in subjects.split(',')]
+        match_conditions.append({'subject': {'$in': subject_list}})
+    
+    if education_level:
+        match_conditions.append({'education_level': education_level})
+    
+    if difficulty:
+        match_conditions.append({'difficulty': difficulty})
+    
+    if sources:
+        source_list = [s.strip() for s in sources.split(',')]
+        match_conditions.append({'source_exam': {'$in': source_list}})
+    
+    query = {'$and': match_conditions} if match_conditions else {}
+    count = await db.questions.count_documents(query)
+    
+    return {'count': count}
+
 # ===== USER ROUTES =====
 
 @api_router.put("/users/subscription")
 async def update_subscription(current_user: dict = Depends(get_current_user)):
-    # This is a mockup - in production would integrate with payment gateway
-    result = await db.users.update_one(
+    await db.users.update_one(
         {'id': current_user['id']},
         {'$set': {'subscription_status': 'premium'}}
     )
-    
     return {'message': 'Subscription updated to premium'}
+
+# ===== STATS ROUTES =====
+
+@api_router.get("/stats/dashboard")
+async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
+    """Get dashboard statistics for user"""
+    user_id = current_user['id']
+    
+    # Get completed attempts
+    completed_attempts = await db.attempts.find(
+        {'user_id': user_id, 'status': 'completed'},
+        {'_id': 0}
+    ).sort('start_time', -1).to_list(100)
+    
+    # Get in-progress attempts
+    in_progress = await db.attempts.find_one(
+        {'user_id': user_id, 'status': 'in_progress'},
+        {'_id': 0}
+    )
+    
+    # Calculate stats
+    total_completed = len(completed_attempts)
+    avg_score = 0
+    if total_completed > 0:
+        scores = [a.get('score', {}).get('percentage', 0) for a in completed_attempts]
+        avg_score = round(sum(scores) / len(scores), 1)
+    
+    # Last attempt info
+    last_attempt = completed_attempts[0] if completed_attempts else None
+    
+    # Get simulations count
+    simulations_count = await db.simulations.count_documents({'created_by': user_id})
+    
+    return {
+        'total_completed': total_completed,
+        'average_score': avg_score,
+        'simulations_created': simulations_count,
+        'last_attempt': last_attempt,
+        'in_progress': in_progress
+    }
 
 # Include router
 app.include_router(api_router)
@@ -587,17 +1116,37 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_db():
-    # Indexes improve performance and prevent duplicates/race conditions.
+    """Create indexes on startup"""
     try:
+        # User indexes
         await db.users.create_index("email", unique=True)
         await db.users.create_index("id", unique=True)
+        
+        # Exam indexes
         await db.exams.create_index("id", unique=True)
         await db.exams.create_index([("published", 1), ("year", -1)])
+        
+        # Question indexes
+        await db.questions.create_index("id", unique=True)
+        await db.questions.create_index("question_hash", unique=True, sparse=True)
+        await db.questions.create_index("exam_id")
+        await db.questions.create_index([("subject", 1), ("education_level", 1)])
         await db.questions.create_index([("exam_id", 1), ("order", 1)])
+        
+        # Simulation indexes
+        await db.simulations.create_index("id", unique=True)
+        await db.simulations.create_index("created_by")
+        
+        # Attempt indexes
+        await db.attempts.create_index("id", unique=True)
+        await db.attempts.create_index("user_id")
+        await db.attempts.create_index("exam_id")
+        await db.attempts.create_index("simulation_id")
         await db.attempts.create_index([("user_id", 1), ("start_time", -1)])
-        logger.info("Mongo indexes ensured.")
-    except Exception:
-        logger.exception("Failed to ensure Mongo indexes")
+        
+        logger.info("MongoDB indexes created successfully.")
+    except Exception as e:
+        logger.exception(f"Failed to create MongoDB indexes: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
