@@ -918,6 +918,28 @@ async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: 
     if attempt['status'] != 'in_progress':
         raise HTTPException(status_code=400, detail='Attempt already completed')
     
+    # VALIDATION: Ensure selected_answer is valid (A-E)
+    if answer_data.selected_answer not in ['A', 'B', 'C', 'D', 'E']:
+        raise HTTPException(status_code=400, detail='Invalid answer. Must be A, B, C, D, or E')
+    
+    # VALIDATION: Verify question_id belongs to this attempt's exam/simulation
+    if attempt.get('exam_id'):
+        question = await db.questions.find_one(
+            {'id': answer_data.question_id, 'exam_id': attempt['exam_id']},
+            {'_id': 0, 'id': 1}
+        )
+    elif attempt.get('simulation_id'):
+        simulation = await db.simulations.find_one({'id': attempt['simulation_id']}, {'_id': 0, 'question_ids': 1})
+        if simulation and answer_data.question_id in simulation.get('question_ids', []):
+            question = {'id': answer_data.question_id}
+        else:
+            question = None
+    else:
+        question = None
+    
+    if not question:
+        raise HTTPException(status_code=400, detail='Invalid question_id for this attempt')
+    
     await db.attempts.update_one(
         {'id': attempt_id},
         {'$set': {f'answers.{answer_data.question_id}': answer_data.selected_answer}}
