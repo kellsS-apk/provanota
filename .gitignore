@@ -10,4 +10,7 @@ node_modules/
 .vscode/
 .idea/
 build/
-dist/
+dist/-e 
+# Environment files
+*.env
+*.env.*
