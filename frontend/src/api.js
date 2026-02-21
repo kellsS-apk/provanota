@@ -51,6 +51,25 @@ export const createQuestion = (data) => api.post('/admin/questions', data);
 export const updateQuestion = (id, data) => api.put(`/admin/questions/${id}`, data);
 export const deleteQuestion = (id) => api.delete(`/admin/questions/${id}`);
 
+// Admin - Import
+export const importQuestions = (data) => api.post('/admin/import/questions', data);
+
+// Simulations
+export const generateSimulation = (data) => api.post('/simulations/generate', data);
+export const getMySimulations = () => api.get('/simulations/my');
+export const getSimulation = (id) => api.get(`/simulations/${id}`);
+export const getSimulationQuestions = (id) => api.get(`/simulations/${id}/questions`);
+export const createSimulationAttempt = (simulationId) => api.post(`/simulations/${simulationId}/attempt`);
+
+// Metadata
+export const getSubjects = () => api.get('/metadata/subjects');
+export const getTopics = (subject) => api.get(`/metadata/topics/${encodeURIComponent(subject)}`);
+export const getFilterOptions = () => api.get('/metadata/filters');
+export const getQuestionCount = (params) => api.get('/metadata/question-count', { params });
+
+// Stats
+export const getDashboardStats = () => api.get('/stats/dashboard');
+
 // User
 export const updateSubscription = () => api.put('/users/subscription');
 
