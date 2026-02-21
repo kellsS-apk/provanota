@@ -685,10 +685,11 @@ async def get_exam_questions(exam_id: str, current_user: dict = Depends(get_curr
     if not exam:
         raise HTTPException(status_code=404, detail='Exam not found')
     
+    # OPTIMIZED: Reasonable limit for exam questions
     questions = await db.questions.find(
         {'exam_id': exam_id}, 
         {'_id': 0, 'correct_answer': 0, 'question_hash': 0}
-    ).sort('order', 1).to_list(1000)
+    ).sort('order', 1).to_list(500)
     return [QuestionResponseStudent(**q) for q in questions]
 
 # ===== SIMULATION ROUTES =====
