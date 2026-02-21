@@ -747,6 +747,17 @@ async def generate_simulation(criteria: SimulationGenerateRequest, current_user:
             detail='Não há questões suficientes com os filtros selecionados'
         )
     
+    # VALIDATION: Verify all question_ids actually exist (defensive check)
+    existing_count = await db.questions.count_documents({'id': {'$in': question_ids}})
+    if existing_count != len(question_ids):
+        logger.warning(f"Question ID mismatch: expected {len(question_ids)}, found {existing_count}")
+        # Re-fetch valid IDs only
+        valid_questions = await db.questions.find(
+            {'id': {'$in': question_ids}}, 
+            {'_id': 0, 'id': 1}
+        ).to_list(len(question_ids))
+        question_ids = [q['id'] for q in valid_questions]
+    
     # Create simulation
     simulation_id = str(uuid.uuid4())
     simulation_doc = {
