@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getAttempt, getExamQuestions, saveAnswer, submitAttempt } from '../api';
-import { Clock, ChevronLeft, ChevronRight, Flag, CheckCircle, Send } from 'lucide-react';
+import { getAttempt, getExamQuestions, getSimulationQuestions, saveAnswer, submitAttempt } from '../api';
+import { Clock, ChevronLeft, ChevronRight, Flag, CheckCircle, Send, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
+import { Progress } from '@/components/ui/progress';
 
 export default function Simulation() {
   const { attemptId } = useParams();
@@ -18,7 +19,6 @@ export default function Simulation() {
   const [submitting, setSubmitting] = useState(false);
   const [showNav, setShowNav] = useState(true);
 
-  // Ref para o autosubmit (evita warning de deps e evita fechar sobre valores antigos)
   const handleAutoSubmitRef = useRef(() => {});
 
   const handleSubmit = useCallback(async () => {
@@ -49,7 +49,6 @@ export default function Simulation() {
     await handleSubmit();
   }, [handleSubmit]);
 
-  // Mantém sempre a versão mais atual do autosubmit no ref
   useEffect(() => {
     handleAutoSubmitRef.current = handleAutoSubmit;
   }, [handleAutoSubmit]);
@@ -59,20 +58,24 @@ export default function Simulation() {
       setLoading(true);
 
       const attemptRes = await getAttempt(attemptId);
-      const questionsRes = await getExamQuestions(attemptRes.data.exam_id);
+      const attemptData = attemptRes.data;
+      
+      // Fetch questions based on exam_id or simulation_id
+      let questionsRes;
+      if (attemptData.exam_id) {
+        questionsRes = await getExamQuestions(attemptData.exam_id);
+      } else if (attemptData.simulation_id) {
+        questionsRes = await getSimulationQuestions(attemptData.simulation_id);
+      } else {
+        throw new Error('No exam or simulation ID found');
+      }
 
-      setAttempt(attemptRes.data);
+      setAttempt(attemptData);
       setQuestions(questionsRes.data);
-      setAnswers(attemptRes.data.answers || {});
+      setAnswers(attemptData.answers || {});
 
-      // Se existir algum campo de duração vindo do backend, use ele.
-      // Se não existir, mantém 3600 (60 min) como fallback.
-      const durationSeconds =
-        attemptRes.data.duration_seconds ??
-        attemptRes.data.duration ??
-        attemptRes.data.exam_duration_seconds ??
-        3600;
-
+      // Use duration_seconds from attempt or default
+      const durationSeconds = attemptData.duration_seconds || 3600;
       setTimeLeft(Number(durationSeconds) || 3600);
     } catch (error) {
       toast.error('Erro ao carregar simulado');
@@ -93,7 +96,6 @@ export default function Simulation() {
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          // chama o autosubmit atual
           handleAutoSubmitRef.current?.();
           return 0;
         }
@@ -128,6 +130,8 @@ export default function Simulation() {
       .padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const isTimeLow = timeLeft < 300; // Less than 5 minutes
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -139,26 +143,41 @@ export default function Simulation() {
   const currentQuestion = questions[currentIndex];
   const isMarked = marked[currentQuestion?.id];
   const answeredCount = Object.keys(answers).length;
+  const progressPercent = questions.length > 0 ? (answeredCount / questions.length) * 100 : 0;
 
   return (
     <div className="min-h-screen bg-[#F8FAFC]">
+      {/* Header with Progress */}
       <div className="bg-white border-b border-slate-200 sticky top-0 z-50" data-testid="simulation-header">
+        {/* Progress Bar */}
+        <div className="h-1 bg-slate-100">
+          <div 
+            className="h-full bg-primary transition-all duration-300"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+        
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <h2 className="font-bold text-slate-900" data-testid="exam-title-header">
-                {attempt?.exam_title}
-              </h2>
+              <div>
+                <h2 className="font-bold text-slate-900 line-clamp-1" data-testid="exam-title-header">
+                  {attempt?.exam_title}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {attempt?.mode === 'official' ? 'Simulado Oficial' : 'Simulado Personalizado'}
+                </p>
+              </div>
               <button
                 onClick={() => setShowNav(!showNav)}
-                className="md:hidden text-primary font-medium"
+                className="md:hidden text-primary font-medium text-sm"
                 data-testid="toggle-nav-button"
               >
-                {showNav ? 'Ocultar Navegação' : 'Mostrar Navegação'}
+                {showNav ? 'Ocultar' : 'Mostrar'} Nav
               </button>
             </div>
 
-            <div className="flex items-center gap-6">
+            <div className="flex items-center gap-4 md:gap-6">
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-5 h-5 text-success" />
                 <span className="text-sm font-medium text-slate-700" data-testid="answered-count">
@@ -166,7 +185,8 @@ export default function Simulation() {
                 </span>
               </div>
 
-              <div className="exam-timer" data-testid="timer">
+              <div className={`exam-timer ${isTimeLow ? 'bg-red-50 text-red-700 animate-pulse' : ''}`} data-testid="timer">
+                {isTimeLow && <AlertTriangle className="w-4 h-4 inline mr-1" />}
                 <Clock className="w-4 h-4 inline mr-2" />
                 {formatTime(timeLeft)}
               </div>
@@ -176,9 +196,16 @@ export default function Simulation() {
       </div>
 
       <div className="flex max-w-7xl mx-auto">
+        {/* Question Navigation Sidebar */}
         {showNav && (
-          <div className="w-64 bg-white border-r border-slate-200 p-4 sticky top-[73px] h-[calc(100vh-73px)] overflow-y-auto" data-testid="question-nav">
-            <h3 className="font-semibold text-slate-900 mb-4">Questões</h3>
+          <div className="w-64 bg-white border-r border-slate-200 p-4 sticky top-[89px] h-[calc(100vh-89px)] overflow-y-auto hidden md:block" data-testid="question-nav">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-slate-900">Questões</h3>
+              <span className="text-xs text-slate-500">
+                {Object.keys(marked).filter(k => marked[k]).length} marcadas
+              </span>
+            </div>
+            
             <div className="grid grid-cols-5 gap-2">
               {questions.map((q, index) => {
                 const answered = answers[q.id];
@@ -193,40 +220,80 @@ export default function Simulation() {
                       isCurrent ? 'current' : answered ? 'answered' : isMarkedQ ? 'marked' : 'bg-slate-100 text-slate-600'
                     }`}
                     data-testid={`question-nav-${index + 1}`}
+                    title={isMarkedQ ? 'Marcada para revisão' : answered ? 'Respondida' : 'Não respondida'}
                   >
                     {index + 1}
                   </button>
                 );
               })}
             </div>
+
+            {/* Legend */}
+            <div className="mt-6 pt-4 border-t border-slate-100">
+              <p className="text-xs text-slate-500 mb-2">Legenda:</p>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full bg-primary"></div>
+                  <span className="text-slate-600">Atual</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full bg-secondary"></div>
+                  <span className="text-slate-600">Respondida</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full bg-amber-500"></div>
+                  <span className="text-slate-600">Marcada</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full bg-slate-200"></div>
+                  <span className="text-slate-600">Não respondida</span>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
-        <div className="flex-1 p-6 md:p-12">
+        {/* Main Content */}
+        <div className="flex-1 p-4 md:p-8 lg:p-12">
           <div className="max-w-3xl mx-auto">
+            {/* Question Header */}
             <div className="flex items-center justify-between mb-6">
               <div>
-                <span className="text-sm text-slate-600">
-                  Questão {currentIndex + 1} de {questions.length}
-                </span>
-                <h3 className="text-xl font-bold text-slate-900" data-testid="question-number">
-                  {currentQuestion?.area}
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-sm font-medium text-slate-500">
+                    Questão {currentIndex + 1} de {questions.length}
+                  </span>
+                  {currentQuestion?.difficulty && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                      currentQuestion.difficulty === 'easy' ? 'bg-green-100 text-green-700'
+                      : currentQuestion.difficulty === 'medium' ? 'bg-amber-100 text-amber-700'
+                      : 'bg-red-100 text-red-700'
+                    }`}>
+                      {currentQuestion.difficulty === 'easy' ? 'Fácil' 
+                       : currentQuestion.difficulty === 'medium' ? 'Médio' 
+                       : 'Difícil'}
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-lg font-bold text-slate-900" data-testid="question-number">
+                  {currentQuestion?.subject || currentQuestion?.area || 'Questão'}
                 </h3>
               </div>
 
               <button
                 onClick={() => setMarked({ ...marked, [currentQuestion.id]: !isMarked })}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
-                  isMarked ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all font-medium ${
+                  isMarked ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                 }`}
                 data-testid="mark-for-review-button"
               >
-                <Flag className="w-4 h-4" />
-                {isMarked ? 'Marcada' : 'Marcar'}
+                <Flag className={`w-4 h-4 ${isMarked ? 'fill-current' : ''}`} />
+                {isMarked ? 'Marcada' : 'Marcar para revisar'}
               </button>
             </div>
 
-            <div className="bg-white rounded-xl border border-slate-100 p-8 mb-6 shadow-sm">
+            {/* Question Card */}
+            <div className="bg-white rounded-xl border border-slate-100 p-6 md:p-8 mb-6 shadow-sm">
               <div className="text-lg leading-relaxed text-slate-900 mb-6" data-testid="question-statement">
                 {currentQuestion?.statement}
               </div>
@@ -235,7 +302,7 @@ export default function Simulation() {
                 <img
                   src={currentQuestion.image_url}
                   alt="Question"
-                  className="max-w-full h-auto rounded-lg mb-6"
+                  className="max-w-full h-auto rounded-lg mb-6 border border-slate-200"
                   data-testid="question-image"
                 />
               )}
@@ -248,7 +315,11 @@ export default function Simulation() {
                     className={`option-row ${answers[currentQuestion.id] === alt.letter ? 'selected' : ''}`}
                     data-testid={`option-${alt.letter}`}
                   >
-                    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center font-bold text-sm">
+                    <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm transition-colors ${
+                      answers[currentQuestion.id] === alt.letter 
+                        ? 'bg-primary text-white' 
+                        : 'bg-slate-100 text-slate-700'
+                    }`}>
                       {alt.letter}
                     </div>
                     <div className="flex-1 text-slate-700">{alt.text}</div>
@@ -257,7 +328,8 @@ export default function Simulation() {
               </div>
             </div>
 
-            <div className="flex items-center justify-between">
+            {/* Navigation Buttons */}
+            <div className="flex items-center justify-between gap-4">
               <button
                 onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
                 disabled={currentIndex === 0}
@@ -265,8 +337,34 @@ export default function Simulation() {
                 data-testid="previous-button"
               >
                 <ChevronLeft className="w-5 h-5" />
-                Anterior
+                <span className="hidden sm:inline">Anterior</span>
               </button>
+
+              {/* Mobile Navigation */}
+              <div className="flex md:hidden items-center gap-1">
+                {questions.slice(
+                  Math.max(0, currentIndex - 2),
+                  Math.min(questions.length, currentIndex + 3)
+                ).map((q, idx) => {
+                  const actualIndex = Math.max(0, currentIndex - 2) + idx;
+                  const answered = answers[q.id];
+                  const isCurrent = actualIndex === currentIndex;
+                  
+                  return (
+                    <button
+                      key={q.id}
+                      onClick={() => setCurrentIndex(actualIndex)}
+                      className={`w-8 h-8 rounded-full text-xs font-medium ${
+                        isCurrent ? 'bg-primary text-white' 
+                        : answered ? 'bg-secondary text-white' 
+                        : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {actualIndex + 1}
+                    </button>
+                  );
+                })}
+              </div>
 
               {currentIndex === questions.length - 1 ? (
                 <button
@@ -276,7 +374,7 @@ export default function Simulation() {
                   data-testid="submit-exam-button"
                 >
                   <Send className="w-5 h-5" />
-                  {submitting ? 'Submetendo...' : 'Finalizar Simulado'}
+                  {submitting ? 'Submetendo...' : 'Finalizar'}
                 </button>
               ) : (
                 <button
@@ -284,11 +382,25 @@ export default function Simulation() {
                   className="btn-primary flex items-center gap-2"
                   data-testid="next-button"
                 >
-                  Próxima
+                  <span className="hidden sm:inline">Próxima</span>
                   <ChevronRight className="w-5 h-5" />
                 </button>
               )}
             </div>
+
+            {/* Quick Submit (not on last question) */}
+            {currentIndex !== questions.length - 1 && answeredCount === questions.length && (
+              <div className="mt-6 text-center">
+                <button
+                  onClick={handleSubmit}
+                  disabled={submitting}
+                  className="text-success hover:underline font-medium text-sm"
+                  data-testid="quick-submit-button"
+                >
+                  Todas respondidas! Clique para finalizar agora
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
