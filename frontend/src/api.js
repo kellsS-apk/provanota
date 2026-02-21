@@ -1,10 +1,32 @@
+
 import axios from 'axios';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API_URL = `${BACKEND_URL}/api`;
+// Backend base URL (configure via Vercel env: REACT_APP_BACKEND_URL)
+const ENV_BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || process.env.REACT_APP_API_URL || '').trim();
+
+function normalizeBaseUrl(url) {
+  if (!url) return '';
+  // Remove trailing slash
+  const noTrailing = url.replace(/\/+$/, '');
+  // If env already points to /api, keep it; otherwise append /api
+  return noTrailing.endsWith('/api') ? noTrailing : `${noTrailing}/api`;
+}
+
+// If ENV_BACKEND_URL is empty, we fall back to same-origin '/api' (only works if you proxy backend behind the same domain).
+export const API_URL = normalizeBaseUrl(ENV_BACKEND_URL) || '/api';
+
+// Helpful runtime check (won't crash the app)
+if (!ENV_BACKEND_URL) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[api] REACT_APP_BACKEND_URL is not set. Using "/api" as fallback. ' +
+      'If your backend is on Render/another domain, set REACT_APP_BACKEND_URL in Vercel.'
+  );
+}
 
 const api = axios.create({
   baseURL: API_URL,
+  timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
   },
