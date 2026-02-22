@@ -37,7 +37,18 @@ export default function Dashboard() {
         getUserAttempts(),
         getDashboardStats().catch(() => ({ data: null }))
       ]);
-      setExams(examsRes.data);
+      // Filter "Simulados Oficiais" (published exams). Be tolerant with backend field names.
+      const examsData = Array.isArray(examsRes?.data) ? examsRes.data : [];
+      const officialExams = examsData.filter((e) =>
+        Boolean(e?.is_published) ||
+        Boolean(e?.published) ||
+        e?.status === 'published' ||
+        e?.status === 'public' ||
+        e?.visibility === 'public'
+      );
+      const examsForHome = officialExams.length > 0 ? officialExams : examsData;
+
+      setExams(examsForHome);
       setAttempts(attemptsRes.data);
       setStats(statsRes.data);
     } catch (error) {
@@ -268,9 +279,9 @@ export default function Dashboard() {
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex-1">
                         <h3 className="text-xl font-bold text-slate-900 mb-2 group-hover:text-primary transition-colors">
-                          {exam.title}
+                          {exam.title || exam.name || exam.nome || 'Simulado'}
                         </h3>
-                        <p className="text-sm text-slate-600">{exam.banca} - {exam.year}</p>
+                        <p className="text-sm text-slate-600">{exam.banca || exam.board || exam.source_exam || exam.sourceExam || exam.institution || ''} - {exam.year ?? exam.ano ?? ''}</p>
                       </div>
                     </div>
 
@@ -281,7 +292,7 @@ export default function Dashboard() {
                       </div>
                       <div className="flex items-center gap-2 text-sm text-slate-600">
                         <BookOpen className="w-4 h-4" />
-                        <span>{exam.question_count} questões</span>
+                        <span>{(exam.question_count ?? exam.questions_count ?? exam.total_questions ?? exam.totalQuestions ?? 0)} questões</span>
                       </div>
                     </div>
 
