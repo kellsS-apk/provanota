@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { generateSimulation, getFilterOptions, createSimulationAttempt } from '../api';
+import { generateSimulation, getFilterOptions, createSimulationAttempt, getQuestionCount } from '../api';
 import { Header } from '../components/Header';
 import { 
   Sparkles, 
@@ -45,32 +45,44 @@ export default function CreateSimulation() {
     }
   };
 
-  // Debounced count update
-  const updateAvailableCount = useCallback(async () => {
-    if (!filterOptions) return;
-    
+  // Debounced count update (real count from backend)
+const countDebounceRef = useRef(null);
+
+const buildCountParams = () => {
+  const params = {};
+  if (selectedSubjects.length > 0) params.subjects = selectedSubjects.join(',');
+  if (educationLevel) params.education_level = educationLevel;
+  if (difficulty) params.difficulty = difficulty;
+  return params;
+};
+
+useEffect(() => {
+  if (!filterOptions) return;
+
+  if (countDebounceRef.current) clearTimeout(countDebounceRef.current);
+  countDebounceRef.current = setTimeout(async () => {
     try {
-      // Build params based on current filters
-      let count = filterOptions.total_questions;
-      
-      // For now, just show total - real count would need backend call
-      // This is a simplified version
-      if (selectedSubjects.length > 0 || educationLevel || difficulty) {
-        // Estimate based on filters
-        count = Math.max(1, Math.floor(count * 0.3)); // Rough estimate
-      }
-      
-      setAvailableCount(count);
-    } catch (error) {
-      console.error('Error updating count:', error);
+      const params = buildCountParams();
+      const res = await getQuestionCount(params);
+      const count = Number(res?.data?.count ?? res?.data?.total ?? 0);
+      setAvailableCount(Number.isFinite(count) ? count : 0);
+    } catch (e) {
+      setAvailableCount(filterOptions.total_questions || 0);
     }
-  }, [filterOptions, selectedSubjects, educationLevel, difficulty]);
+  }, 350);
 
-  useEffect(() => {
-    updateAvailableCount();
-  }, [updateAvailableCount]);
+  return () => {
+    if (countDebounceRef.current) clearTimeout(countDebounceRef.current);
+  };
+}, [filterOptions, selectedSubjects, educationLevel, difficulty]);
 
-  const handleSubjectToggle = (subject) => {
+// Keep slider within available questions
+useEffect(() => {
+  if (!Number.isFinite(availableCount) || availableCount <= 0) return;
+  setQuestionLimit((prev) => Math.min(prev, availableCount));
+}, [availableCount]);
+
+const handleSubjectToggle = (subject) => {
     setSelectedSubjects(prev => 
       prev.includes(subject)
         ? prev.filter(s => s !== subject)
@@ -78,7 +90,14 @@ export default function CreateSimulation() {
     );
   };
 
+  const isValid = (selectedSubjects.length > 0) && (availableCount > 0) && (questionLimit >= 1) && (questionLimit <= availableCount);
+
   const handleGenerate = async () => {
+    if (availableCount > 0 && questionLimit > availableCount) {
+      toast.error(`Você pediu ${questionLimit} questões, mas só existem ${availableCount} com esses filtros.`);
+      return;
+    }
+
     setGenerating(true);
     
     try {
