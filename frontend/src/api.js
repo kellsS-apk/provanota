@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 
 // Backend base URL (configure via Vercel env: REACT_APP_BACKEND_URL)
@@ -48,6 +49,7 @@ export const getExamQuestions = (id) => api.get(`/exams/${id}/questions`);
 // Attempts
 export const createAttempt = (data) => api.post('/attempts', data);
 export const getAttempt = (id) => api.get(`/attempts/${id}`);
+export const getAttemptReview = (id) => api.get(`/attempts/${id}/review`);
 export const saveAnswer = (attemptId, data) => api.post(`/attempts/${attemptId}/answer`, data);
 export const submitAttempt = (id) => api.post(`/attempts/${id}/submit`, {});
 export const getUserAttempts = () => api.get('/attempts');
