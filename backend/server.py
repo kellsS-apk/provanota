@@ -914,6 +914,60 @@ async def get_attempt(attempt_id: str, current_user: dict = Depends(get_current_
     
     return AttemptResponse(**attempt)
 
+@api_router.get("/attempts/{attempt_id}/review")
+async def get_attempt_review(attempt_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Returns attempt review data including correct answers for the attempt owner.
+    This endpoint is intended for the Results page to show which questions were correct/incorrect.
+    """
+    attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
+    if not attempt:
+        raise HTTPException(status_code=404, detail='Attempt not found')
+
+    # For fairness, only allow review after submission
+    if attempt.get('status') != 'completed':
+        raise HTTPException(status_code=400, detail='Attempt not completed')
+
+    questions: list = []
+
+    # Official exam attempt
+    if attempt.get('exam_id'):
+        cursor = db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).sort('order', 1)
+        questions = await cursor.to_list(2000)
+
+    # Generated simulation attempt
+    elif attempt.get('simulation_id'):
+        simulation = await db.simulations.find_one({'id': attempt['simulation_id'], 'created_by': current_user['id']}, {'_id': 0})
+        if not simulation:
+            raise HTTPException(status_code=404, detail='Simulation not found')
+
+        qids = simulation.get('question_ids') or []
+        if not qids:
+            return {'attempt_id': attempt_id, 'items': []}
+
+        qdocs = await db.questions.find({'id': {'$in': qids}}, {'_id': 0}).to_list(len(qids))
+        qmap = {q['id']: q for q in qdocs}
+        # Preserve simulation order
+        questions = [qmap[qid] for qid in qids if qid in qmap]
+    else:
+        raise HTTPException(status_code=400, detail='Attempt missing exam_id/simulation_id')
+
+    answers = attempt.get('answers') or {}
+
+    items = []
+    for q in questions:
+        qid = q.get('id')
+        selected = answers.get(qid)
+        correct = q.get('correct_answer')
+        items.append({
+            'question': q,
+            'selected_answer': selected,
+            'correct_answer': correct,
+            'is_correct': selected is not None and correct is not None and selected == correct
+        })
+
+    return {'attempt_id': attempt_id, 'items': items}
+
 @api_router.post("/attempts/{attempt_id}/answer")
 async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: dict = Depends(get_current_user)):
     attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
