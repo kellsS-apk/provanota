@@ -274,6 +274,35 @@ class AttemptResponse(BaseModel):
     score: Optional[Dict[str, Any]] = None
     duration_seconds: Optional[int] = None
 
+
+class AttemptReviewItem(BaseModel):
+    question_id: str
+    statement: str
+    image_url: Optional[str] = None
+    alternatives: List[Alternative]
+    correct_answer: str
+    selected_answer: Optional[str] = None
+    is_correct: bool
+    tags: List[str] = []
+    difficulty: str = "medium"
+    area: str = "string"
+    subject: str = "string"
+    topic: str = "string"
+    education_level: str = "vestibular"
+    source_exam: str = "string"
+    year: int = 0
+    explanation: Optional[str] = None
+
+
+class AttemptReviewResponse(BaseModel):
+    attempt_id: str
+    exam_id: str
+    score: float
+    correct_count: int
+    total_questions: int
+    questions: List[AttemptReviewItem]
+
+
 # Import Model
 class QuestionImport(BaseModel):
     statement: str
@@ -914,59 +943,67 @@ async def get_attempt(attempt_id: str, current_user: dict = Depends(get_current_
     
     return AttemptResponse(**attempt)
 
-@api_router.get("/attempts/{attempt_id}/review")
+
+
+@api_router.get("/attempts/{attempt_id}/review", response_model=AttemptReviewResponse)
 async def get_attempt_review(attempt_id: str, current_user: dict = Depends(get_current_user)):
-    """
-    Returns attempt review data including correct answers for the attempt owner.
-    This endpoint is intended for the Results page to show which questions were correct/incorrect.
-    """
-    attempt = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']}, {'_id': 0})
+    """Return attempt review with correct answers (for the attempt owner)."""
+    attempt = await db.attempts.find_one({"id": attempt_id, "user_id": current_user["id"]})
     if not attempt:
-        raise HTTPException(status_code=404, detail='Attempt not found')
+        raise HTTPException(status_code=404, detail="Attempt not found")
 
-    # For fairness, only allow review after submission
-    if attempt.get('status') != 'completed':
-        raise HTTPException(status_code=400, detail='Attempt not completed')
+    exam_id = attempt.get("exam_id")
+    exam = await db.exams.find_one({"id": exam_id})
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
 
-    questions: list = []
+    questions = await db.questions.find({"exam_id": exam_id}).to_list(length=None)
+    total = len(questions)
+    answers = attempt.get("answers", {}) or {}
 
-    # Official exam attempt
-    if attempt.get('exam_id'):
-        cursor = db.questions.find({'exam_id': attempt['exam_id']}, {'_id': 0}).sort('order', 1)
-        questions = await cursor.to_list(2000)
+    correct_count = 0
+    review_items: List[AttemptReviewItem] = []
 
-    # Generated simulation attempt
-    elif attempt.get('simulation_id'):
-        simulation = await db.simulations.find_one({'id': attempt['simulation_id'], 'created_by': current_user['id']}, {'_id': 0})
-        if not simulation:
-            raise HTTPException(status_code=404, detail='Simulation not found')
-
-        qids = simulation.get('question_ids') or []
-        if not qids:
-            return {'attempt_id': attempt_id, 'items': []}
-
-        qdocs = await db.questions.find({'id': {'$in': qids}}, {'_id': 0}).to_list(len(qids))
-        qmap = {q['id']: q for q in qdocs}
-        # Preserve simulation order
-        questions = [qmap[qid] for qid in qids if qid in qmap]
-    else:
-        raise HTTPException(status_code=400, detail='Attempt missing exam_id/simulation_id')
-
-    answers = attempt.get('answers') or {}
-
-    items = []
     for q in questions:
-        qid = q.get('id')
+        qid = q.get("id")
         selected = answers.get(qid)
-        correct = q.get('correct_answer')
-        items.append({
-            'question': q,
-            'selected_answer': selected,
-            'correct_answer': correct,
-            'is_correct': selected is not None and correct is not None and selected == correct
-        })
+        correct_answer = q.get("correct_answer")
+        is_correct = bool(selected) and selected == correct_answer
+        if is_correct:
+            correct_count += 1
 
-    return {'attempt_id': attempt_id, 'items': items}
+        review_items.append(
+            AttemptReviewItem(
+                question_id=qid,
+                statement=q.get("statement", ""),
+                image_url=q.get("image_url"),
+                alternatives=q.get("alternatives", []),
+                correct_answer=correct_answer,
+                selected_answer=selected,
+                is_correct=is_correct,
+                tags=q.get("tags", []),
+                difficulty=q.get("difficulty", "medium"),
+                area=q.get("area", "string"),
+                subject=q.get("subject", "string"),
+                topic=q.get("topic", "string"),
+                education_level=q.get("education_level", "vestibular"),
+                source_exam=q.get("source_exam", "string"),
+                year=q.get("year", 0),
+                explanation=q.get("explanation"),
+            )
+        )
+
+    score = (correct_count / total) * 100 if total else 0.0
+
+    return AttemptReviewResponse(
+        attempt_id=attempt_id,
+        exam_id=exam_id,
+        score=score,
+        correct_count=correct_count,
+        total_questions=total,
+        questions=review_items,
+    )
+
 
 @api_router.post("/attempts/{attempt_id}/answer")
 async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: dict = Depends(get_current_user)):
