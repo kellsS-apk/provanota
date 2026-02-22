@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getAttempt, getExamQuestions, getSimulationQuestions } from '../api';
+import { getAttempt, getAttemptReview } from '../api';
 import { Header } from '../components/Header';
 import { AdPlaceholder } from '../components/AdPlaceholder';
 import { 
@@ -21,6 +21,8 @@ export default function Results() {
   const { attemptId } = useParams();
   const [attempt, setAttempt] = useState(null);
   const [questions, setQuestions] = useState([]);
+  const [reviewItems, setReviewItems] = useState([]);
+  const [expandedQuestionId, setExpandedQuestionId] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -32,17 +34,15 @@ export default function Results() {
     try {
       const attemptRes = await getAttempt(attemptId);
       const attemptData = attemptRes.data;
-      
-      // Fetch questions based on exam_id or simulation_id
-      let questionsRes;
-      if (attemptData.exam_id) {
-        questionsRes = await getExamQuestions(attemptData.exam_id);
-      } else if (attemptData.simulation_id) {
-        questionsRes = await getSimulationQuestions(attemptData.simulation_id);
-      }
-      
+
+      // Fetch review items (includes correct answers) for the attempt owner
+      const reviewRes = await getAttemptReview(attemptId);
+      const items = reviewRes?.data?.items || [];
+
       setAttempt(attemptData);
-      setQuestions(questionsRes?.data || []);
+      setReviewItems(items);
+      // Keep a plain questions array for any legacy UI parts that expect it
+      setQuestions(items.map((it) => it.question));
     } catch (error) {
       toast.error('Erro ao carregar resultados');
       navigate('/dashboard');
@@ -186,6 +186,99 @@ export default function Results() {
             </div>
           </div>
         )}
+
+
+        {/* Review */}
+        <div className="bg-white border border-slate-200 rounded-xl p-6 mb-8" data-testid="review-card">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-primary" />
+                Revisão das Questões
+              </h3>
+              <p className="text-sm text-slate-600">
+                Veja o que você marcou e qual era o gabarito.
+              </p>
+            </div>
+          </div>
+
+          {reviewItems.length === 0 ? (
+            <div className="text-sm text-slate-600">
+              Nenhuma questão disponível para revisão ainda.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {reviewItems.map((item, idx) => {
+                const q = item.question || {};
+                const selected = item.selected_answer;
+                const correct = item.correct_answer;
+                const isCorrect = item.is_correct;
+
+                const isOpen = expandedQuestionId === q.id;
+
+                return (
+                  <div key={q.id || idx} className="border border-slate-200 rounded-lg overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedQuestionId(isOpen ? null : q.id)}
+                      className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition"
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`inline-flex items-center gap-2 text-sm font-semibold ${
+                          isCorrect ? 'text-green-700' : 'text-red-700'
+                        }`}>
+                          {isCorrect ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                          Questão {idx + 1}
+                        </span>
+                        <span className="text-xs text-slate-600">
+                          {q.subject ? q.subject : (q.area ? q.area : '—')}
+                          {q.difficulty ? ` • ${q.difficulty}` : ''}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-slate-600">
+                        <span className="mr-3">Marcada: <strong>{selected || '—'}</strong></span>
+                        <span>Gabarito: <strong>{correct || '—'}</strong></span>
+                      </div>
+                    </button>
+
+                    {isOpen && (
+                      <div className="px-4 py-4 bg-white">
+                        <div className="text-sm text-slate-900 whitespace-pre-wrap mb-4">
+                          {q.statement}
+                        </div>
+
+                        <div className="space-y-2">
+                          {(q.alternatives || []).map((alt) => {
+                            const isSel = alt.letter === selected;
+                            const isRight = alt.letter === correct;
+
+                            let cls = "border border-slate-200";
+                            if (isRight) cls = "border border-green-400 bg-green-50";
+                            else if (isSel && !isCorrect) cls = "border border-red-400 bg-red-50";
+
+                            return (
+                              <div key={alt.letter} className={`rounded-md p-3 text-sm ${cls}`}>
+                                <span className="font-semibold mr-2">{alt.letter})</span>
+                                <span className="text-slate-800">{alt.text}</span>
+                                {isRight && <span className="ml-2 text-xs font-semibold text-green-700">Correta</span>}
+                                {isSel && !isCorrect && <span className="ml-2 text-xs font-semibold text-red-700">Sua resposta</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="mt-4 text-xs text-slate-600">
+                          Em breve: explicações por questão (resolução) aqui.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {/* Recommendations */}
         {weakAreas.length > 0 && (
