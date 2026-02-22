@@ -58,20 +58,19 @@ const PublicRoute = ({ children }) => {
   return children;
 };
 
-
-// Home Redirect (better UX)
+// Home Redirect (CORRIGIDO)
 const HomeRedirect = () => {
   const { user, loading } = useAuth();
 
   if (loading) {
     return (
-      <div className=\"min-h-screen flex items-center justify-center\">
-        <div className=\"animate-spin rounded-full h-12 w-12 border-b-2 border-primary\"></div>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
       </div>
     );
   }
 
-  if (!user) return <Navigate to=\"/login\" replace />;
+  if (!user) return <Navigate to="/login" replace />;
   return <Navigate to={user.role === 'admin' ? '/admin' : '/dashboard'} replace />;
 };
 
@@ -114,7 +113,6 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
-      {/* Simulation Routes */}
       <Route path="/simulations/create" element={
         <ProtectedRoute>
           <CreateSimulation />
@@ -127,7 +125,6 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
-      {/* Admin Routes */}
       <Route path="/admin" element={
         <ProtectedRoute adminOnly>
           <AdminDashboard />
