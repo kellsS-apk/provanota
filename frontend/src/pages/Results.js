@@ -195,7 +195,7 @@ const Results = () => {
         <div style={{ border: '1px solid #e5e7eb', borderRadius: 14, padding: 14, background: '#fff' }}>
           <div style={{ fontSize: 13, color: '#6b7280' }}>Pontuação</div>
           <div style={{ fontSize: 28, fontWeight: 700, marginTop: 6 }}>
-            {stats ? `${Math.round(stats.score)}%` : (attempt.score != null ? `${Math.round(attempt.score)}%` : '—')}
+            {stats ? `${Math.round(stats.score)}%` : (typeof attempt?.score === 'number' ? `${Math.round(attempt.score)}%` : (typeof attempt?.score?.percentage === 'number' ? `${Math.round(attempt.score.percentage)}%` : '—'))}
           </div>
           {stats && (
             <div style={{ marginTop: 8, fontSize: 13, color: '#374151' }}>
