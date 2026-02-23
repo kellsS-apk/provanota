@@ -946,112 +946,97 @@ async def get_attempt(attempt_id: str, current_user: dict = Depends(get_current_
 
 
 @api_router.get("/attempts/{attempt_id}/review", response_model=AttemptReviewResponse)
-async def get_attempt_review(attempt_id: str, current_user: dict = Depends(get_current_user)):
-    """Detailed review for an attempt (works for both Exams and Simulations).
-
-    Returns:
-      - per-question: selected_answer, correct_answer, is_correct + question metadata
-      - aggregates: total_questions, correct_count, score (%)
-    """
-    attempt = await db.attempts.find_one({"_id": ObjectId(attempt_id), "user_id": current_user["_id"]})
-    if not attempt:
+async def get_attempt_review(attempt_id: str, current_user=Depends(get_current_user)):
+    attempt_doc = await db.attempts.find_one({'id': attempt_id, 'user_id': current_user['id']})
+    if not attempt_doc:
         raise HTTPException(status_code=404, detail="Attempt not found")
 
-    # Determine source of questions: exam or simulation
-    questions: list[dict] = []
-    question_order: list[str] | None = None
+    # Attempt may be from an exam OR a personalized simulation
+    exam_id = attempt_doc.get("exam_id")
+    simulation_id = attempt_doc.get("simulation_id")
+    user_answers = attempt_doc.get("user_answers") or {}
 
-    exam_id = attempt.get("exam_id")
-    simulation_id = attempt.get("simulation_id")
+    question_ids: List[str] = []
 
     if exam_id:
-        exam = await db.exams.find_one({"_id": ObjectId(exam_id)})
-        if not exam:
-            raise HTTPException(status_code=404, detail="Exam not found")
-
-        qids = exam.get("question_ids") or []
-        question_order = [str(qid) for qid in qids if qid]
-        if question_order:
-            questions = await db.questions.find({"_id": {"$in": [ObjectId(qid) for qid in question_order]}}).to_list(None)
+        exam = await db.exams.find_one({'id': exam_id})
+        if exam:
+            question_ids = exam.get("question_ids") or []
         else:
-            # fallback (rare): exam exists but has no explicit ordering
-            questions = await db.questions.find({"exam_id": ObjectId(exam_id)}).to_list(None)
-
+            # fallback to answers keys
+            question_ids = list(user_answers.keys())
     elif simulation_id:
-        simulation = await db.simulations.find_one({"_id": ObjectId(simulation_id), "user_id": current_user["_id"]})
-        if not simulation:
-            raise HTTPException(status_code=404, detail="Simulation not found")
-
-        qids = simulation.get("question_ids") or []
-        question_order = [str(qid) for qid in qids if qid]
-        if not question_order:
-            raise HTTPException(status_code=400, detail="Simulation has no questions")
-
-        questions = await db.questions.find({"_id": {"$in": [ObjectId(qid) for qid in question_order]}}).to_list(None)
-
+        simulation = await db.simulations.find_one({'id': simulation_id, 'user_id': current_user['id']})
+        if simulation:
+            question_ids = simulation.get("question_ids") or []
+        else:
+            # fallback to answers keys
+            question_ids = list(user_answers.keys())
     else:
-        raise HTTPException(status_code=400, detail="Attempt has no exam_id or simulation_id")
+        question_ids = list(user_answers.keys())
 
-    # Index questions for stable ordering
-    q_by_id = {str(q["_id"]): q for q in questions}
-    if question_order:
-        ordered_questions = [q_by_id[qid] for qid in question_order if qid in q_by_id]
-    else:
-        ordered_questions = questions
+    if not question_ids:
+        raise HTTPException(status_code=404, detail="Questions not found for this attempt")
 
-    # Build answers map
-    answers = attempt.get("answers", []) or []
-    answers_map = {str(a.get("question_id")): a.get("selected_answer") for a in answers if a.get("question_id")}
+    q_docs = await db.questions.find({'id': {'$in': question_ids}}).to_list(length=len(question_ids))
+    q_by_id = {q['id']: q for q in q_docs}
 
-    review_items: list[AttemptReviewQuestion] = []
+    review_items: List[AttemptReviewItem] = []
     correct_count = 0
 
-    for q in ordered_questions:
-        qid = str(q["_id"])
-        selected = answers_map.get(qid)
-        correct = q.get("correct_answer")
-        is_correct = (selected is not None) and (selected == correct)
+    # Preserve original order (exam/simulation order)
+    for qid in question_ids:
+        qdoc = q_by_id.get(qid)
+        if not qdoc:
+            continue
+
+        selected = user_answers.get(qid)
+        correct_answer = qdoc.get("correct_answer")
+        is_correct = bool(selected) and selected == correct_answer
         if is_correct:
             correct_count += 1
 
-        review_items.append(
-            AttemptReviewQuestion(
-                question_id=qid,
-                statement=q.get("statement", ""),
-                image_url=q.get("image_url"),
-                alternatives=q.get("alternatives", []),
-                correct_answer=correct,
-                selected_answer=selected,
-                is_correct=is_correct,
-                area=q.get("area"),
-                subject=q.get("subject"),
-                difficulty=q.get("difficulty"),
-                explanation=q.get("explanation"),
-            )
-        )
+        # Normalize alternatives to Alternative model
+        alternatives = []
+        for alt in (qdoc.get("alternatives") or []):
+            if isinstance(alt, dict):
+                alternatives.append(Alternative(letter=alt.get("letter"), text=alt.get("text")))
+            else:
+                # already Alternative
+                alternatives.append(alt)
+
+        review_items.append(AttemptReviewItem(
+            question_id=qid,
+            statement=qdoc.get("statement") or "",
+            image_url=qdoc.get("image_url"),
+            alternatives=alternatives,
+            correct_answer=correct_answer,
+            selected_answer=selected,
+            is_correct=is_correct,
+            tags=qdoc.get("tags") or [],
+            difficulty=qdoc.get("difficulty") or "medium",
+            area=qdoc.get("area") or "string",
+            subject=qdoc.get("subject") or "string",
+            topic=qdoc.get("topic") or "string",
+            education_level=qdoc.get("education_level") or "vestibular",
+            source_exam=qdoc.get("source_exam") or "string",
+            year=qdoc.get("year") or 0,
+            explanation=qdoc.get("explanation")
+        ))
 
     total_questions = len(review_items)
-
-    # Score: prefer attempt.score.percentage if it exists and is a number; otherwise compute.
-    score_value = None
-    raw_score = attempt.get("score")
-    if isinstance(raw_score, dict):
-        pct = raw_score.get("percentage")
-        if isinstance(pct, (int, float)) and pct == pct:  # pct==pct filters NaN
-            score_value = float(pct)
-    elif isinstance(raw_score, (int, float)) and raw_score == raw_score:
-        score_value = float(raw_score)
-
-    if score_value is None:
-        score_value = (correct_count / total_questions) * 100 if total_questions else 0.0
+    score = (correct_count / total_questions) * 100 if total_questions else 0
 
     return AttemptReviewResponse(
         attempt_id=attempt_id,
+        exam_id=exam_id or simulation_id or "",
         total_questions=total_questions,
         correct_count=correct_count,
-        score=score_value,
-        questions=review_items,
+        score=score,
+        questions=review_items
     )
+
+
 
 @api_router.post("/attempts/{attempt_id}/answer")
 async def save_answer(attempt_id: str, answer_data: AnswerSubmit, current_user: dict = Depends(get_current_user)):
