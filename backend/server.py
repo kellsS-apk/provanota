@@ -954,32 +954,57 @@ async def get_attempt_review(attempt_id: str, current_user=Depends(get_current_u
     # Attempt may be from an exam OR a personalized simulation
     exam_id = attempt_doc.get("exam_id")
     simulation_id = attempt_doc.get("simulation_id")
-    user_answers = attempt_doc.get("user_answers") or {}
+    # Answers are stored as a dict on the attempt: {"<question_id>": "A"}
+    # Keep compatibility with older versions.
+    user_answers = attempt_doc.get("answers") or attempt_doc.get("user_answers") or {}
+
+    # Normalize keys to strings to avoid mismatches (Mongo IDs may be int).
+    user_answers = {str(k): v for k, v in user_answers.items()}
 
     question_ids: List[str] = []
 
+    # Prefer querying questions by exam_id (most common schema).
+    q_docs: List[dict] = []
+    question_ids = []
+
     if exam_id:
-        exam = await db.exams.find_one({'id': exam_id})
-        if exam:
-            question_ids = exam.get("question_ids") or []
-        else:
-            # fallback to answers keys
-            question_ids = list(user_answers.keys())
+        q_docs = await db.questions.find({'exam_id': exam_id}).to_list(length=None)
+
+        # Fallback to exam.question_ids ordering if questions don't have exam_id
+        if not q_docs:
+            exam = await db.exams.find_one({'id': exam_id})
+            if exam:
+                question_ids = exam.get("question_ids") or []
+
     elif simulation_id:
         simulation = await db.simulations.find_one({'id': simulation_id, 'user_id': current_user['id']})
         if simulation:
             question_ids = simulation.get("question_ids") or []
-        else:
-            # fallback to answers keys
-            question_ids = list(user_answers.keys())
-    else:
+
+    # Last resort: infer question_ids from stored answers
+    if not question_ids and not q_docs:
         question_ids = list(user_answers.keys())
 
-    if not question_ids:
+    if question_ids and not q_docs:
+        norm_qids = []
+        for qid in question_ids:
+            try:
+                norm_qids.append(int(qid))
+            except Exception:
+                norm_qids.append(qid)
+        q_docs = await db.questions.find({'id': {'$in': norm_qids}}).to_list(length=len(norm_qids))
+
+    if not q_docs:
         raise HTTPException(status_code=404, detail="Questions not found for this attempt")
 
-    q_docs = await db.questions.find({'id': {'$in': question_ids}}).to_list(length=len(question_ids))
-    q_by_id = {q['id']: q for q in q_docs}
+    # Build index by stringified question id for consistent lookups
+    q_by_id = {str(q.get('id')): q for q in q_docs}
+
+    # If we didn't get an explicit ordering, use the DB order
+    if not question_ids:
+        question_ids = [str(q.get('id')) for q in q_docs]
+    else:
+        question_ids = [str(qid) for qid in question_ids]
 
     review_items: List[AttemptReviewItem] = []
     correct_count = 0
